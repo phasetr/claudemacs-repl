@@ -76,25 +76,21 @@ Returns the buffer if found, nil otherwise."
   "After opening restricted buffer, set up window layout.
 The buffer is displayed but immediately followed by window layout setup."
   (unless enkan-repl-buffer-restriction--redirecting
-    ;; Set flag immediately to prevent multiple invocations
-    (setq enkan-repl-buffer-restriction--redirecting t)
     ;; Cancel any pending timer
     (when (timerp enkan-repl-buffer-restriction--pending-timer)
       (cancel-timer enkan-repl-buffer-restriction--pending-timer))
-    ;; Set new timer
+    ;; Set new timer - flag is only set during actual execution
     (setq enkan-repl-buffer-restriction--pending-timer
           (run-at-time 0.1 nil
                        (lambda ()
                          (when (and (fboundp 'enkan-repl-setup-window-layout)
                                     enkan-repl-buffer-restriction-mode) ; Check mode is still on
-                           ;; Temporarily disable advice during layout setup
-                           (let ((enkan-repl-buffer-restriction--redirecting t))
-                             (enkan-repl-setup-window-layout)
-                             (message "Window layout adjusted (buffer restriction active)"))
-                           ;; Reset flag after a delay to allow normal operation
-                           (run-at-time 1.0 nil
-                                        (lambda ()
-                                          (setq enkan-repl-buffer-restriction--redirecting nil)))))))))
+                           ;; Set flag only during layout setup
+                           (setq enkan-repl-buffer-restriction--redirecting t)
+                           (enkan-repl-setup-window-layout)
+                           (message "Window layout adjusted (buffer restriction active)")
+                           ;; Reset flag immediately after layout setup
+                           (setq enkan-repl-buffer-restriction--redirecting nil)))))))
 
 ;;;; Advice Functions
 
@@ -105,11 +101,14 @@ BUFFER-OR-NAME is the buffer to switch to.
 ARGS are additional arguments."
   (let ((result (apply orig-fun buffer-or-name args)))
     ;; After switching, check if we need to adjust layout
-    (when (and enkan-repl-buffer-restriction-mode
-               (not enkan-repl-buffer-restriction--redirecting))
+    (when enkan-repl-buffer-restriction-mode
       (let ((buffer (get-buffer buffer-or-name)))
-        (when (enkan-repl-buffer-restriction--is-restricted-buffer-p buffer)
-          (enkan-repl-buffer-restriction--redirect-from-restricted))))
+        (when buffer
+          (let ((is-restricted (enkan-repl-buffer-restriction--is-restricted-buffer-p buffer)))
+            (when is-restricted
+              (message "Detected switch to restricted buffer: %s" (buffer-name buffer))
+              (unless enkan-repl-buffer-restriction--redirecting
+                (enkan-repl-buffer-restriction--redirect-from-restricted)))))))
     result))
 
 (defun enkan-repl-buffer-restriction--check-display (orig-fun buffer-or-name &rest args)
