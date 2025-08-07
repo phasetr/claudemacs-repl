@@ -154,18 +154,22 @@ ARGS are additional arguments."
 
 (defun enkan-repl-buffer-restriction--setup-mode-line ()
   "Set up mode line indicator for buffer restriction mode."
-  ;; Add to mode-line-format if not already present
-  (unless (memq 'enkan-repl-buffer-restriction--mode-line-indicator mode-line-format)
-    (setq-default mode-line-format
-                  (append mode-line-format
-                          '((:eval (enkan-repl-buffer-restriction--mode-line-indicator)))))))
+  ;; Initialize global-mode-string if needed
+  (unless global-mode-string
+    (setq global-mode-string '("")))
+  ;; Add to global-mode-string which is more reliable
+  (unless (member '(:eval (enkan-repl-buffer-restriction--mode-line-indicator)) 
+                  global-mode-string)
+    (setq global-mode-string
+          (append global-mode-string
+                  '((:eval (enkan-repl-buffer-restriction--mode-line-indicator)))))))
 
 (defun enkan-repl-buffer-restriction--remove-mode-line ()
   "Remove mode line indicator for buffer restriction mode."
-  (setq-default mode-line-format
-                (delq 'enkan-repl-buffer-restriction--mode-line-indicator
-                      (delq '(:eval (enkan-repl-buffer-restriction--mode-line-indicator))
-                            mode-line-format))))
+  (setq global-mode-string
+        (delq 'enkan-repl-buffer-restriction--mode-line-indicator
+              (delq '(:eval (enkan-repl-buffer-restriction--mode-line-indicator))
+                    global-mode-string))))
 
 
 ;;;; Public API
@@ -237,8 +241,13 @@ This prevents navigation to *enkan-eat* and *claudemacs:* buffers."
 (defun enkan-repl-buffer-restriction-mode-status ()
   "Show current status of buffer restriction mode."
   (interactive)
-  (message "Buffer restriction mode: %s"
-           (if enkan-repl-buffer-restriction-mode "ON" "OFF")))
+  (let ((mode-status (if enkan-repl-buffer-restriction-mode "ON" "OFF"))
+        (buffer-match (string-match-p "enkan--" (buffer-name)))
+        (indicator-shown (enkan-repl-buffer-restriction--mode-line-indicator)))
+    (message "Buffer restriction: %s | Current buffer: %s | Shows [BR]: %s" 
+             mode-status
+             (if buffer-match "enkan input file" "other buffer")
+             (if (string= indicator-shown "") "no" "yes"))))
 
 ;;;; Testing Functions
 
