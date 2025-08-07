@@ -150,25 +150,27 @@ ARGS are additional arguments."
                 'face '(:foreground "#ff6600" :weight bold)
                 'help-echo "Buffer Restriction ON: claudemacs/eat navigation triggers layout adjustment")))
 
-(defvar enkan-repl-buffer-restriction-lighter " [BR]"
-  "Lighter for buffer restriction mode.")
-
-(define-minor-mode enkan-repl-buffer-restriction-indicator-mode
-  "Minor mode to show buffer restriction status in mode line."
-  :lighter (:eval (when (and enkan-repl-buffer-restriction-mode
-                              (string-match-p "enkan--" (buffer-name)))
-                     (propertize enkan-repl-buffer-restriction-lighter
-                                 'face '(:foreground "#ff6600" :weight bold)
-                                 'help-echo "Buffer Restriction ON")))
-  :global t)
-
 (defun enkan-repl-buffer-restriction--setup-mode-line ()
   "Set up mode line indicator for buffer restriction mode."
-  (enkan-repl-buffer-restriction-indicator-mode 1))
+  ;; Add a simple function to the mode-line-misc-info
+  (add-to-list 'mode-line-misc-info
+               '(:eval (when (and enkan-repl-buffer-restriction-mode
+                                  (string-match-p "enkan--" (buffer-name)))
+                         (propertize " [BR]"
+                                     'face '(:foreground "#ff6600" :weight bold)
+                                     'help-echo "Buffer Restriction Mode is ON")))
+               t))
 
 (defun enkan-repl-buffer-restriction--remove-mode-line ()
   "Remove mode line indicator for buffer restriction mode."
-  (enkan-repl-buffer-restriction-indicator-mode -1))
+  ;; Remove our indicator from mode-line-misc-info
+  (setq mode-line-misc-info
+        (delete '(:eval (when (and enkan-repl-buffer-restriction-mode
+                                   (string-match-p "enkan--" (buffer-name)))
+                          (propertize " [BR]"
+                                      'face '(:foreground "#ff6600" :weight bold)
+                                      'help-echo "Buffer Restriction Mode is ON")))
+                mode-line-misc-info)))
 
 
 ;;;; Public API
@@ -242,11 +244,17 @@ This prevents navigation to *enkan-eat* and *claudemacs:* buffers."
   (interactive)
   (let ((mode-status (if enkan-repl-buffer-restriction-mode "ON" "OFF"))
         (buffer-match (string-match-p "enkan--" (buffer-name)))
-        (minor-mode-on enkan-repl-buffer-restriction-indicator-mode))
-    (message "Buffer restriction: %s | Current buffer: %s | Minor mode: %s" 
+        (in-misc-info (member '(:eval (when (and enkan-repl-buffer-restriction-mode
+                                                  (string-match-p "enkan--" (buffer-name)))
+                                         (propertize " [BR]"
+                                                     'face '(:foreground "#ff6600" :weight bold)
+                                                     'help-echo "Buffer Restriction Mode is ON")))
+                              mode-line-misc-info)))
+    (message "Buffer restriction: %s | Current buffer: %s | In mode-line: %s | mode-line-misc-info: %S" 
              mode-status
              (if buffer-match "enkan input file" "other buffer")
-             (if minor-mode-on "ON" "OFF"))))
+             (if in-misc-info "yes" "no")
+             mode-line-misc-info)))
 
 ;;;; Testing Functions
 
