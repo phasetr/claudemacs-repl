@@ -38,8 +38,6 @@ Default includes *enkan-eat*, *claudemacs* (with or without colon), and *eat* bu
 (defvar enkan-repl-buffer-restriction--redirecting nil
   "Flag to prevent recursive redirection.")
 
-(defvar enkan-repl-buffer-restriction--pending-timer nil
-  "Timer for pending layout adjustment.")
 
 ;;;; Pure Functions
 
@@ -73,24 +71,13 @@ Returns the buffer if found, nil otherwise."
       buffer)))
 
 (defun enkan-repl-buffer-restriction--redirect-from-restricted ()
-  "After opening restricted buffer, set up window layout.
-The buffer is displayed but immediately followed by window layout setup."
+  "Immediately set up window layout when restricted buffer is opened."
   (unless enkan-repl-buffer-restriction--redirecting
-    ;; Cancel any pending timer
-    (when (timerp enkan-repl-buffer-restriction--pending-timer)
-      (cancel-timer enkan-repl-buffer-restriction--pending-timer))
-    ;; Set new timer - flag is only set during actual execution
-    (setq enkan-repl-buffer-restriction--pending-timer
-          (run-at-time 0.1 nil
-                       (lambda ()
-                         (when (and (fboundp 'enkan-repl-setup-window-layout)
-                                    enkan-repl-buffer-restriction-mode) ; Check mode is still on
-                           ;; Set flag only during layout setup
-                           (setq enkan-repl-buffer-restriction--redirecting t)
-                           (enkan-repl-setup-window-layout)
-                           (message "Window layout adjusted (buffer restriction active)")
-                           ;; Reset flag immediately after layout setup
-                           (setq enkan-repl-buffer-restriction--redirecting nil)))))))
+    (when (and (fboundp 'enkan-repl-setup-window-layout)
+               enkan-repl-buffer-restriction-mode)
+      (setq enkan-repl-buffer-restriction--redirecting t)
+      (enkan-repl-setup-window-layout)
+      (setq enkan-repl-buffer-restriction--redirecting nil))))
 
 ;;;; Advice Functions
 
@@ -106,7 +93,6 @@ ARGS are additional arguments."
         (when buffer
           (let ((is-restricted (enkan-repl-buffer-restriction--is-restricted-buffer-p buffer)))
             (when is-restricted
-              (message "Detected switch to restricted buffer: %s" (buffer-name buffer))
               (unless enkan-repl-buffer-restriction--redirecting
                 (enkan-repl-buffer-restriction--redirect-from-restricted)))))))
     result))
@@ -224,11 +210,6 @@ This prevents navigation to *enkan-eat* and *claudemacs:* buffers."
   (when enkan-repl-buffer-restriction-mode
     ;; Disable mode
     (setq enkan-repl-buffer-restriction-mode nil)
-    
-    ;; Cancel any pending timer
-    (when (timerp enkan-repl-buffer-restriction--pending-timer)
-      (cancel-timer enkan-repl-buffer-restriction--pending-timer)
-      (setq enkan-repl-buffer-restriction--pending-timer nil))
     
     ;; Reset flags
     (setq enkan-repl-buffer-restriction--redirecting nil)
