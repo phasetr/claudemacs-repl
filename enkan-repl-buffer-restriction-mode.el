@@ -177,6 +177,16 @@ This prevents navigation to *enkan-eat* and *claudemacs:* buffers."
     ;; Update mode lines for restricted buffers
     (enkan-repl-buffer-restriction--update-restricted-buffers-mode-line t)
     
+    ;; Check all visible windows for restricted buffers
+    (let ((restricted-window-found nil))
+      (dolist (window (window-list))
+        (let ((buffer (window-buffer window)))
+          (when (enkan-repl-buffer-restriction--is-restricted-buffer-p buffer)
+            (setq restricted-window-found t))))
+      ;; If any restricted buffer is visible, adjust layout
+      (when restricted-window-found
+        (enkan-repl-buffer-restriction--redirect-from-restricted)))
+    
     (message "Buffer restriction mode enabled")))
 
 ;;;###autoload
