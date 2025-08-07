@@ -895,15 +895,24 @@ This is the author's preference - customize as needed.
 
 Category: Session Controller"
   (interactive)
-  (let
-      ((target-dir (enkan-repl--get-target-directory-for-buffer)))
+  (let* ((target-dir (enkan-repl--get-target-directory-for-buffer))
+         (input-file-path (enkan-repl--get-project-file-path target-dir))
+         (input-buffer (when (file-exists-p input-file-path)
+                         (find-file-noselect input-file-path))))
     (delete-other-windows)
+    ;; Set up left window with input file
+    (if input-buffer
+        (switch-to-buffer input-buffer)
+      ;; If no input file exists, create it
+      (enkan-repl-open-project-input-file target-dir))
+    ;; Set up right window with claudemacs
     (split-window-right)
     (other-window 1)
     (let ((claudemacs-buf (enkan-repl--get-buffer-for-directory target-dir)))
       (if claudemacs-buf
           (switch-to-buffer claudemacs-buf)
         (message "claudemacs buffer not found. Run (enkan-repl-start-claudemacs) first.")))
+    ;; Return to left window (input file)
     (other-window -1)
     (message "Window layout setup complete")))
 
