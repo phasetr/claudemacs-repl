@@ -152,14 +152,30 @@ ARGS are additional arguments."
 
 (defun enkan-repl-buffer-restriction--setup-mode-line ()
   "Set up mode line indicator for buffer restriction mode."
-  ;; Add a simple function to the mode-line-misc-info
+  ;; Initialize mode-line-misc-info if it's nil or not a list
+  (unless (and (boundp 'mode-line-misc-info)
+               (listp mode-line-misc-info))
+    (setq mode-line-misc-info '("")))
+  
+  ;; Ensure mode-line-misc-info is in mode-line-format
+  (unless (and (boundp 'mode-line-format)
+               (or (memq 'mode-line-misc-info mode-line-format)
+                   (member '("" mode-line-misc-info) mode-line-format)))
+    ;; Add mode-line-misc-info to mode-line-format if not present
+    (when (listp mode-line-format)
+      (setq mode-line-format
+            (append mode-line-format '(mode-line-misc-info)))))
+  
+  ;; Add our indicator to mode-line-misc-info
   (add-to-list 'mode-line-misc-info
                '(:eval (when (and enkan-repl-buffer-restriction-mode
                                   (string-match-p "enkan--" (buffer-name)))
                          (propertize " [BR]"
                                      'face '(:foreground "#ff6600" :weight bold)
                                      'help-echo "Buffer Restriction Mode is ON")))
-               t))
+               t)
+  ;; Force mode line update
+  (force-mode-line-update t))
 
 (defun enkan-repl-buffer-restriction--remove-mode-line ()
   "Remove mode line indicator for buffer restriction mode."
