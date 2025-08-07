@@ -142,14 +142,6 @@ ARGS are additional arguments."
 
 ;;;; Mode Line Functions
 
-(defun enkan-repl-buffer-restriction--mode-line-indicator ()
-  "Return mode line indicator for buffer restriction status."
-  (when (and enkan-repl-buffer-restriction-mode
-             (string-match-p "enkan--" (buffer-name)))
-    (propertize " [BR] "
-                'face '(:foreground "#ff6600" :weight bold)
-                'help-echo "Buffer Restriction ON: claudemacs/eat navigation triggers layout adjustment")))
-
 (defun enkan-repl-buffer-restriction--setup-mode-line ()
   "Set up mode line indicator for buffer restriction mode."
   ;; Initialize mode-line-misc-info if it's nil or not a list
@@ -258,50 +250,8 @@ This prevents navigation to *enkan-eat* and *claudemacs:* buffers."
 (defun enkan-repl-buffer-restriction-mode-status ()
   "Show current status of buffer restriction mode."
   (interactive)
-  (let ((mode-status (if enkan-repl-buffer-restriction-mode "ON" "OFF"))
-        (buffer-match (string-match-p "enkan--" (buffer-name)))
-        (in-misc-info (member '(:eval (when (and enkan-repl-buffer-restriction-mode
-                                                  (string-match-p "enkan--" (buffer-name)))
-                                         (propertize " [BR]"
-                                                     'face '(:foreground "#ff6600" :weight bold)
-                                                     'help-echo "Buffer Restriction Mode is ON")))
-                              mode-line-misc-info)))
-    (message "Buffer restriction: %s | Current buffer: %s | In mode-line: %s | mode-line-misc-info: %S" 
-             mode-status
-             (if buffer-match "enkan input file" "other buffer")
-             (if in-misc-info "yes" "no")
-             mode-line-misc-info)))
-
-;;;; Testing Functions
-
-(defun enkan-repl-buffer-restriction--test-create-buffers ()
-  "Create test buffers for testing restriction mode."
-  (interactive)
-  ;; Create test buffers that should be restricted
-  (get-buffer-create "*enkan-eat-test*")
-  (get-buffer-create "*claudemacs:test*")
-  ;; Create normal buffer that should not be restricted
-  (get-buffer-create "*normal-buffer*")
-  (message "Test buffers created"))
-
-(defun enkan-repl-buffer-restriction--test-patterns ()
-  "Test pattern matching functionality."
-  (interactive)
-  (let ((test-cases '(("*enkan-eat*" . t)
-                     ("*enkan-eat-session1*" . t)
-                     ("*claudemacs:dir*" . t)
-                     ("*eat*" . nil)
-                     ("*scratch*" . nil))))
-    (dolist (test test-cases)
-      (let* ((buffer-name (car test))
-             (expected (cdr test))
-             (result (enkan-repl-buffer-restriction--match-pattern-p
-                     buffer-name
-                     enkan-repl-buffer-restriction-patterns)))
-        (message "Test %s: %s (expected %s)"
-                buffer-name
-                (if (eq result expected) "PASS" "FAIL")
-                expected)))))
+  (message "Buffer restriction mode: %s"
+           (if enkan-repl-buffer-restriction-mode "ON" "OFF")))
 
 (provide 'enkan-repl-buffer-restriction-mode)
 
