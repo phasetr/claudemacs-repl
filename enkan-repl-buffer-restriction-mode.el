@@ -157,11 +157,31 @@ When ENABLE is non-nil, apply restriction color.
 Otherwise, restore original appearance."
   (with-current-buffer buffer
     (if enable
-        ;; Apply restriction color
-        (face-remap-add-relative 'mode-line
-                                :background enkan-repl-buffer-restriction-mode-line-color)
-      ;; Remove face remapping
-      (face-remap-reset-base 'mode-line))))
+        (progn
+          ;; Apply restriction color with multiple approaches for compatibility
+          ;; 1. Standard mode-line face
+          (face-remap-add-relative 'mode-line
+                                  :background enkan-repl-buffer-restriction-mode-line-color
+                                  :foreground "#000000")
+          ;; 2. Mode-line-inactive for unfocused windows
+          (face-remap-add-relative 'mode-line-inactive
+                                  :background enkan-repl-buffer-restriction-mode-line-color
+                                  :foreground "#333333")
+          ;; 3. For Doom Modeline compatibility
+          (when (boundp 'doom-modeline-bar-inactive)
+            (face-remap-add-relative 'doom-modeline-bar
+                                    :background enkan-repl-buffer-restriction-mode-line-color)
+            (face-remap-add-relative 'doom-modeline-bar-inactive
+                                    :background enkan-repl-buffer-restriction-mode-line-color))
+          ;; 4. Set buffer-local variable for custom mode-line formats
+          (setq-local enkan-repl-buffer-restriction--restricted t))
+      ;; Remove all face remappings
+      (face-remap-reset-base 'mode-line)
+      (face-remap-reset-base 'mode-line-inactive)
+      (when (boundp 'doom-modeline-bar-inactive)
+        (face-remap-reset-base 'doom-modeline-bar)
+        (face-remap-reset-base 'doom-modeline-bar-inactive))
+      (kill-local-variable 'enkan-repl-buffer-restriction--restricted))))
 
 (defun enkan-repl-buffer-restriction--update-restricted-buffers-mode-line (enable)
   "Update mode line for all restricted buffers.
@@ -169,6 +189,17 @@ When ENABLE is non-nil, apply restriction color."
   (dolist (buffer (buffer-list))
     (when (enkan-repl-buffer-restriction--is-restricted-buffer-p buffer)
       (enkan-repl-buffer-restriction--update-mode-line-for-buffer buffer enable))))
+
+;;;; Hook Functions
+
+(defun enkan-repl-buffer-restriction--window-change-hook ()
+  "Update mode line when window configuration changes."
+  (when enkan-repl-buffer-restriction-mode
+    (dolist (window (window-list))
+      (let ((buffer (window-buffer window)))
+        (when (enkan-repl-buffer-restriction--is-restricted-buffer-p buffer)
+          ;; Force update for visible restricted buffers
+          (enkan-repl-buffer-restriction--update-mode-line-for-buffer buffer t))))))
 
 ;;;; Public API
 
@@ -188,6 +219,10 @@ This prevents navigation to *enkan-eat* and *claudemacs:* buffers."
                 #'enkan-repl-buffer-restriction--check-display)
     (advice-add 'pop-to-buffer :around
                 #'enkan-repl-buffer-restriction--check-pop)
+    
+    ;; Add window change hook for persistent mode line updates
+    (add-hook 'window-configuration-change-hook
+              #'enkan-repl-buffer-restriction--window-change-hook)
     
     ;; Update mode lines for restricted buffers
     (enkan-repl-buffer-restriction--update-restricted-buffers-mode-line t)
@@ -219,6 +254,10 @@ This prevents navigation to *enkan-eat* and *claudemacs:* buffers."
     
     ;; Reset flags
     (setq enkan-repl-buffer-restriction--redirecting nil)
+    
+    ;; Remove hooks
+    (remove-hook 'window-configuration-change-hook
+                 #'enkan-repl-buffer-restriction--window-change-hook)
     
     ;; Remove advice
     (advice-remove 'switch-to-buffer
