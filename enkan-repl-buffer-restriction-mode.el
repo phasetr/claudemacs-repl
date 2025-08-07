@@ -47,6 +47,9 @@ Default is a soft red color."
 (defvar enkan-repl-buffer-restriction--redirecting nil
   "Flag to prevent recursive redirection.")
 
+(defvar enkan-repl-buffer-restriction--pending-timer nil
+  "Timer for pending layout adjustment.")
+
 ;;;; Pure Functions
 
 (defun enkan-repl-buffer-restriction--match-pattern-p (buffer-name patterns)
@@ -82,13 +85,25 @@ Returns the buffer if found, nil otherwise."
   "After opening restricted buffer, set up window layout.
 The buffer is displayed but immediately followed by window layout setup."
   (unless enkan-repl-buffer-restriction--redirecting
-    (let ((enkan-repl-buffer-restriction--redirecting t))
-      ;; Wait a moment for the buffer to be displayed
-      (run-at-time 0.1 nil
-                   (lambda ()
-                     (when (fboundp 'enkan-repl-setup-window-layout)
-                       (enkan-repl-setup-window-layout)
-                       (message "Window layout adjusted (buffer restriction active)")))))))
+    ;; Set flag immediately to prevent multiple invocations
+    (setq enkan-repl-buffer-restriction--redirecting t)
+    ;; Cancel any pending timer
+    (when (timerp enkan-repl-buffer-restriction--pending-timer)
+      (cancel-timer enkan-repl-buffer-restriction--pending-timer))
+    ;; Set new timer
+    (setq enkan-repl-buffer-restriction--pending-timer
+          (run-at-time 0.1 nil
+                       (lambda ()
+                         (when (and (fboundp 'enkan-repl-setup-window-layout)
+                                    enkan-repl-buffer-restriction-mode) ; Check mode is still on
+                           ;; Temporarily disable advice during layout setup
+                           (let ((enkan-repl-buffer-restriction--redirecting t))
+                             (enkan-repl-setup-window-layout)
+                             (message "Window layout adjusted (buffer restriction active)"))
+                           ;; Reset flag after a delay to allow normal operation
+                           (run-at-time 1.0 nil
+                                        (lambda ()
+                                          (setq enkan-repl-buffer-restriction--redirecting nil)))))))))
 
 ;;;; Advice Functions
 
@@ -196,6 +211,14 @@ This prevents navigation to *enkan-eat* and *claudemacs:* buffers."
   (when enkan-repl-buffer-restriction-mode
     ;; Disable mode
     (setq enkan-repl-buffer-restriction-mode nil)
+    
+    ;; Cancel any pending timer
+    (when (timerp enkan-repl-buffer-restriction--pending-timer)
+      (cancel-timer enkan-repl-buffer-restriction--pending-timer)
+      (setq enkan-repl-buffer-restriction--pending-timer nil))
+    
+    ;; Reset flags
+    (setq enkan-repl-buffer-restriction--redirecting nil)
     
     ;; Remove advice
     (advice-remove 'switch-to-buffer
