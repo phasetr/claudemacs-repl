@@ -144,32 +144,31 @@ ARGS are additional arguments."
 
 (defun enkan-repl-buffer-restriction--mode-line-indicator ()
   "Return mode line indicator for buffer restriction status."
-  (when enkan-repl-buffer-restriction-mode
-    (if (string-match-p "enkan--" (buffer-name))
-        ;; Only show in enkan input files - minimal indicator
-        (propertize " [BR] "
-                    'face '(:foreground "#888888" :weight normal)
-                    'help-echo "Buffer Restriction ON: claudemacs/eat navigation triggers layout adjustment")
-      "")))
+  (when (and enkan-repl-buffer-restriction-mode
+             (string-match-p "enkan--" (buffer-name)))
+    (propertize " [BR] "
+                'face '(:foreground "#ff6600" :weight bold)
+                'help-echo "Buffer Restriction ON: claudemacs/eat navigation triggers layout adjustment")))
+
+(defvar enkan-repl-buffer-restriction-lighter " [BR]"
+  "Lighter for buffer restriction mode.")
+
+(define-minor-mode enkan-repl-buffer-restriction-indicator-mode
+  "Minor mode to show buffer restriction status in mode line."
+  :lighter (:eval (when (and enkan-repl-buffer-restriction-mode
+                              (string-match-p "enkan--" (buffer-name)))
+                     (propertize enkan-repl-buffer-restriction-lighter
+                                 'face '(:foreground "#ff6600" :weight bold)
+                                 'help-echo "Buffer Restriction ON")))
+  :global t)
 
 (defun enkan-repl-buffer-restriction--setup-mode-line ()
   "Set up mode line indicator for buffer restriction mode."
-  ;; Initialize global-mode-string if needed
-  (unless global-mode-string
-    (setq global-mode-string '("")))
-  ;; Add to global-mode-string which is more reliable
-  (unless (member '(:eval (enkan-repl-buffer-restriction--mode-line-indicator)) 
-                  global-mode-string)
-    (setq global-mode-string
-          (append global-mode-string
-                  '((:eval (enkan-repl-buffer-restriction--mode-line-indicator)))))))
+  (enkan-repl-buffer-restriction-indicator-mode 1))
 
 (defun enkan-repl-buffer-restriction--remove-mode-line ()
   "Remove mode line indicator for buffer restriction mode."
-  (setq global-mode-string
-        (delq 'enkan-repl-buffer-restriction--mode-line-indicator
-              (delq '(:eval (enkan-repl-buffer-restriction--mode-line-indicator))
-                    global-mode-string))))
+  (enkan-repl-buffer-restriction-indicator-mode -1))
 
 
 ;;;; Public API
@@ -243,11 +242,11 @@ This prevents navigation to *enkan-eat* and *claudemacs:* buffers."
   (interactive)
   (let ((mode-status (if enkan-repl-buffer-restriction-mode "ON" "OFF"))
         (buffer-match (string-match-p "enkan--" (buffer-name)))
-        (indicator-shown (enkan-repl-buffer-restriction--mode-line-indicator)))
-    (message "Buffer restriction: %s | Current buffer: %s | Shows [BR]: %s" 
+        (minor-mode-on enkan-repl-buffer-restriction-indicator-mode))
+    (message "Buffer restriction: %s | Current buffer: %s | Minor mode: %s" 
              mode-status
              (if buffer-match "enkan input file" "other buffer")
-             (if (string= indicator-shown "") "no" "yes"))))
+             (if minor-mode-on "ON" "OFF"))))
 
 ;;;; Testing Functions
 
