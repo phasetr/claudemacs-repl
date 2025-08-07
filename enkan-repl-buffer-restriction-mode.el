@@ -103,12 +103,18 @@ The buffer is displayed but immediately followed by window layout setup."
 ORIG-FUN is the original function.
 BUFFER-OR-NAME is the buffer to switch to.
 ARGS are additional arguments."
+  (when enkan-repl-buffer-restriction-mode
+    (let ((buffer (get-buffer buffer-or-name)))
+      (when (and buffer 
+                 (enkan-repl-buffer-restriction--is-restricted-buffer-p buffer))
+        (message "Switching to restricted buffer: %s" (buffer-name buffer)))))
   (let ((result (apply orig-fun buffer-or-name args)))
     ;; After switching, check if we need to adjust layout
     (when (and enkan-repl-buffer-restriction-mode
                (not enkan-repl-buffer-restriction--redirecting))
       (let ((buffer (get-buffer buffer-or-name)))
         (when (enkan-repl-buffer-restriction--is-restricted-buffer-p buffer)
+          (message "Triggering layout adjustment for: %s" (buffer-name buffer))
           (enkan-repl-buffer-restriction--redirect-from-restricted))))
     result))
 
@@ -209,10 +215,15 @@ This prevents navigation to *enkan-eat* and *claudemacs:* buffers."
       (dolist (window (window-list))
         (let ((buffer (window-buffer window)))
           (when (enkan-repl-buffer-restriction--is-restricted-buffer-p buffer)
-            (setq restricted-window-found t))))
-      ;; If any restricted buffer is visible, adjust layout
+            (setq restricted-window-found t)
+            (message "Found restricted buffer in window: %s" (buffer-name buffer)))))
+      ;; If any restricted buffer is visible, adjust layout immediately
       (when restricted-window-found
-        (enkan-repl-buffer-restriction--redirect-from-restricted)))
+        (message "Adjusting layout for existing restricted buffers...")
+        ;; Don't use the timer-based redirect, do it immediately
+        (when (fboundp 'enkan-repl-setup-window-layout)
+          (enkan-repl-setup-window-layout)
+          (message "Window layout adjusted for existing buffers"))))
     
     (message "Buffer restriction mode enabled")))
 
