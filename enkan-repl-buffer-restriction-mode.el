@@ -24,9 +24,9 @@
   :prefix "enkan-repl-buffer-restriction-")
 
 (defcustom enkan-repl-buffer-restriction-patterns
-  '("^\\*enkan-eat" "^\\*claudemacs:")
+  '("^\\*enkan-eat" "^\\*claudemacs" "^\\*eat\\*")
   "List of regexp patterns for buffers to restrict access to.
-Default includes *enkan-eat* and *claudemacs:* buffers."
+Default includes *enkan-eat*, *claudemacs* (with or without colon), and *eat* buffers."
   :type '(repeat regexp)
   :group 'enkan-repl-buffer-restriction)
 
@@ -252,6 +252,17 @@ This prevents navigation to *enkan-eat* and *claudemacs:* buffers."
   (interactive)
   (message "Buffer restriction mode: %s"
            (if enkan-repl-buffer-restriction-mode "ON" "OFF")))
+
+;;;###autoload
+(defun enkan-repl-buffer-restriction-test-buffer ()
+  "Test if current buffer is restricted."
+  (interactive)
+  (let* ((buffer-name (buffer-name))
+         (is-restricted (enkan-repl-buffer-restriction--is-restricted-buffer-p (current-buffer))))
+    (message "Buffer: %s | Restricted: %s | Patterns: %S"
+             buffer-name
+             (if is-restricted "YES" "NO")
+             enkan-repl-buffer-restriction-patterns)))
 
 (provide 'enkan-repl-buffer-restriction-mode)
 
