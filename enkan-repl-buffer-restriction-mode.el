@@ -88,7 +88,7 @@ The buffer is displayed but immediately followed by window layout setup."
                    (lambda ()
                      (when (fboundp 'enkan-repl-setup-window-layout)
                        (enkan-repl-setup-window-layout)
-                       (message "Window layout adjusted (buffer restriction active)"))))))
+                       (message "Window layout adjusted (buffer restriction active)")))))))
 
 ;;;; Advice Functions
 
