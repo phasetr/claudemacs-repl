@@ -70,60 +70,215 @@ Returns the buffer if found, nil otherwise."
                     (find-file-noselect file-path))))
       buffer)))
 
+(defun enkan-repl-buffer-restriction--find-claudemacs-directory ()
+  "Find the directory associated with existing claudemacs buffer."
+  (let ((claudemacs-buffers (cl-remove-if-not
+                             (lambda (buf)
+                               (string-match-p "^\\*claudemacs" (buffer-name buf)))
+                             (buffer-list))))
+    (when claudemacs-buffers
+      ;; Get directory from first claudemacs buffer
+      (with-current-buffer (car claudemacs-buffers)
+        default-directory))))
+
+(defun enkan-repl-buffer-restriction--get-target-directory ()
+  "現在のバッファから適切なターゲットディレクトリを取得する."
+  ;; 現在のバッファがenkan入力ファイルの場合、そのディレクトリを使用
+  (if (string-match-p "^enkan--" (buffer-name))
+      ;; バッファ名からディレクトリを復元
+      ;; enkan--Users--sekine--.emacs.d.org -> /Users/sekine/.emacs.d/
+      (let ((buf-name (buffer-name)))
+        (if (string-match "^enkan--\\(.+\\)\\.org" buf-name)
+            (let ((path-part (match-string 1 buf-name)))
+              ;; -- を / に置換
+              (setq path-part (replace-regexp-in-string "--" "/" path-part))
+              (concat "/" path-part "/"))
+          default-directory))
+    default-directory))
+
 (defun enkan-repl-buffer-restriction--redirect-from-restricted ()
-  "Immediately set up window layout when restricted buffer is opened."
+  "無関係なファイルから制限バッファを開こうとした場合、入力ファイルと制限バッファをレイアウト表示する."
   (unless enkan-repl-buffer-restriction--redirecting
-    (when (and (fboundp 'enkan-repl-setup-window-layout)
-               enkan-repl-buffer-restriction-mode)
+    (when enkan-repl-buffer-restriction-mode
       (setq enkan-repl-buffer-restriction--redirecting t)
-      (enkan-repl-setup-window-layout)
+      
+      ;; 現在のバッファから適切なディレクトリを取得
+      (let* ((target-dir (enkan-repl-buffer-restriction--get-target-directory))
+             ;; 対応するclaudemacsバッファを探す
+             (claudemacs-buf (cl-find-if
+                              (lambda (buf)
+                                (and (string-match-p "^\\*claudemacs" (buffer-name buf))
+                                     (with-current-buffer buf
+                                       (string= (expand-file-name default-directory)
+                                                (expand-file-name target-dir)))))
+                              (buffer-list))))
+        
+        ;; レイアウトを設定: 左に入力ファイル、右に制限バッファ
+        (delete-other-windows)
+        
+        ;; 左ウィンドウに入力ファイルを設定
+        ;; まず既存のenkan入力ファイルバッファを探す
+        (let* ((expected-buffer-pattern
+                ;; /Users/sekine/.emacs.d/ -> enkan--Users--sekine--.emacs.d
+                (let ((clean-dir (directory-file-name target-dir)))
+                  (concat "^enkan--"
+                          (replace-regexp-in-string "/" "--" (substring clean-dir 1))
+                          "\\.org")))
+               (input-buffer
+                (or
+                 ;; 既存のenkan入力バッファを探す
+                 (cl-find-if
+                  (lambda (buf)
+                    (string-match-p expected-buffer-pattern (buffer-name buf)))
+                  (buffer-list))
+                 ;; enkan-replで作成を試みる
+                 (when (and (require 'enkan-repl nil t)
+                            (fboundp 'enkan-repl--get-project-file-path))
+                   (let ((input-file-path (enkan-repl--get-project-file-path target-dir)))
+                     (or (get-file-buffer input-file-path)
+                         (when (file-exists-p input-file-path)
+                           (find-file-noselect input-file-path))
+                         (when (fboundp 'enkan-repl-open-project-input-file)
+                           (save-window-excursion
+                             (enkan-repl-open-project-input-file target-dir)
+                             (current-buffer)))))))))
+          (if input-buffer
+              (switch-to-buffer input-buffer)
+            ;; 入力ファイルが見つからない場合は、新規作成を試みる
+            (if (and (require 'enkan-repl nil t)
+                     (fboundp 'enkan-repl-open-project-input-file))
+                (enkan-repl-open-project-input-file target-dir)
+              ;; それもできない場合は現在のバッファに留まる
+              (message "Cannot find or create input file for %s" target-dir))))
+        
+        ;; 右ウィンドウに制限バッファ（claudemacs）を設定
+        (split-window-right)
+        (other-window 1)
+        (if claudemacs-buf
+            (switch-to-buffer claudemacs-buf)
+          ;; claudemacsバッファがなければエラーメッセージ
+          (message "Claudemacs buffer not found for %s" target-dir))
+        
+        ;; 左ウィンドウ（入力ファイル）に戻る
+        (other-window -1)
+        (message "Window layout setup complete: input file (left) + restricted buffer (right)"))
+      
       (setq enkan-repl-buffer-restriction--redirecting nil))))
 
 ;;;; Advice Functions
+
+(defun enkan-repl-buffer-restriction--check-other-window (orig-fun count &rest args)
+  "Advice for `other-window' to check restrictions.
+ORIG-FUN is the original function.
+COUNT is the window count to move.
+ARGS are additional arguments."
+  ;; Check if target window has restricted buffer
+  (if (and enkan-repl-buffer-restriction-mode
+           (not enkan-repl-buffer-restriction--redirecting))
+      (let* ((current-win (selected-window))
+             ;; Find the target window based on count
+             (target-window (if (> count 0)
+                                ;; Forward: get next window count times
+                                (let ((win current-win))
+                                  (dotimes (_ (abs count))
+                                    (setq win (next-window win)))
+                                  win)
+                              ;; Backward: get previous window count times
+                              (let ((win current-win))
+                                (dotimes (_ (abs count))
+                                  (setq win (previous-window win)))
+                                win)))
+             (target-buffer (window-buffer target-window)))
+        (if (enkan-repl-buffer-restriction--is-restricted-buffer-p target-buffer)
+            ;; Don't move to restricted window
+            (progn
+              (message "Cannot switch to window with restricted buffer %s" (buffer-name target-buffer))
+              (selected-window))  ; Stay in current window
+          ;; OK to move
+          (apply orig-fun count args)))
+    ;; Mode off or redirecting - proceed normally
+    (apply orig-fun count args)))
+
+(defun enkan-repl-buffer-restriction--check-select-window (orig-fun window &rest args)
+  "Advice for `select-window' to check restrictions.
+ORIG-FUN is the original function.
+WINDOW is the window to select.
+ARGS are additional arguments."
+  ;; Check BEFORE selecting
+  (if (and enkan-repl-buffer-restriction-mode
+           (not enkan-repl-buffer-restriction--redirecting))
+      (let ((buffer (window-buffer window)))
+        (if (and buffer
+                 (enkan-repl-buffer-restriction--is-restricted-buffer-p buffer))
+            ;; Don't select restricted window
+            (progn
+              (message "Cannot select window with restricted buffer %s" (buffer-name buffer))
+              (selected-window))  ; Return current window
+          ;; OK to select
+          (apply orig-fun window args)))
+    ;; Mode off or redirecting - proceed normally
+    (apply orig-fun window args)))
 
 (defun enkan-repl-buffer-restriction--check-switch (orig-fun buffer-or-name &rest args)
   "Advice for `switch-to-buffer' to check restrictions.
 ORIG-FUN is the original function.
 BUFFER-OR-NAME is the buffer to switch to.
 ARGS are additional arguments."
-  (let ((result (apply orig-fun buffer-or-name args)))
-    ;; After switching, check if we need to adjust layout
-    (when enkan-repl-buffer-restriction-mode
+  ;; Check BEFORE switching
+  (if (and enkan-repl-buffer-restriction-mode
+           (not enkan-repl-buffer-restriction--redirecting))
       (let ((buffer (get-buffer buffer-or-name)))
-        (when buffer
-          (let ((is-restricted (enkan-repl-buffer-restriction--is-restricted-buffer-p buffer)))
-            (when is-restricted
-              (unless enkan-repl-buffer-restriction--redirecting
-                (enkan-repl-buffer-restriction--redirect-from-restricted)))))))
-    result))
+        (if (and buffer
+                 (enkan-repl-buffer-restriction--is-restricted-buffer-p buffer))
+            ;; Restricted buffer - redirect and don't call original function
+            (progn
+              (message "Buffer %s is restricted. Redirecting..." (buffer-name buffer))
+              (enkan-repl-buffer-restriction--redirect-from-restricted))
+          ;; Not restricted - proceed normally
+          (apply orig-fun buffer-or-name args)))
+    ;; Mode off or redirecting - proceed normally
+    (apply orig-fun buffer-or-name args)))
 
 (defun enkan-repl-buffer-restriction--check-display (orig-fun buffer-or-name &rest args)
   "Advice for `display-buffer' to check restrictions.
 ORIG-FUN is the original function.
 BUFFER-OR-NAME is the buffer to display.
 ARGS are additional arguments."
-  (let ((result (apply orig-fun buffer-or-name args)))
-    ;; After displaying, check if we need to adjust layout
-    (when (and enkan-repl-buffer-restriction-mode
-               (not enkan-repl-buffer-restriction--redirecting))
+  ;; Check BEFORE displaying
+  (if (and enkan-repl-buffer-restriction-mode
+           (not enkan-repl-buffer-restriction--redirecting))
       (let ((buffer (get-buffer buffer-or-name)))
-        (when (enkan-repl-buffer-restriction--is-restricted-buffer-p buffer)
-          (enkan-repl-buffer-restriction--redirect-from-restricted))))
-    result))
+        (if (and buffer
+                 (enkan-repl-buffer-restriction--is-restricted-buffer-p buffer))
+            ;; Restricted buffer - redirect and don't display
+            (progn
+              (message "Buffer %s is restricted. Redirecting..." (buffer-name buffer))
+              (enkan-repl-buffer-restriction--redirect-from-restricted)
+              nil)  ; Return nil to indicate no window was created
+          ;; Not restricted - proceed normally
+          (apply orig-fun buffer-or-name args)))
+    ;; Mode off or redirecting - proceed normally
+    (apply orig-fun buffer-or-name args)))
 
 (defun enkan-repl-buffer-restriction--check-pop (orig-fun buffer-or-name &rest args)
   "Advice for `pop-to-buffer' to check restrictions.
 ORIG-FUN is the original function.
 BUFFER-OR-NAME is the buffer to pop to.
 ARGS are additional arguments."
-  (let ((result (apply orig-fun buffer-or-name args)))
-    ;; After popping, check if we need to adjust layout
-    (when (and enkan-repl-buffer-restriction-mode
-               (not enkan-repl-buffer-restriction--redirecting))
+  ;; Check BEFORE popping
+  (if (and enkan-repl-buffer-restriction-mode
+           (not enkan-repl-buffer-restriction--redirecting))
       (let ((buffer (get-buffer buffer-or-name)))
-        (when (enkan-repl-buffer-restriction--is-restricted-buffer-p buffer)
-          (enkan-repl-buffer-restriction--redirect-from-restricted))))
-    result))
+        (if (and buffer
+                 (enkan-repl-buffer-restriction--is-restricted-buffer-p buffer))
+            ;; Restricted buffer - redirect and don't pop
+            (progn
+              (message "Buffer %s is restricted. Redirecting..." (buffer-name buffer))
+              (enkan-repl-buffer-restriction--redirect-from-restricted))
+          ;; Not restricted - proceed normally
+          (apply orig-fun buffer-or-name args)))
+    ;; Mode off or redirecting - proceed normally
+    (apply orig-fun buffer-or-name args)))
 
 ;;;; Mode Line Functions
 
@@ -184,6 +339,10 @@ This prevents navigation to *enkan-eat* and *claudemacs:* buffers."
                 #'enkan-repl-buffer-restriction--check-display)
     (advice-add 'pop-to-buffer :around
                 #'enkan-repl-buffer-restriction--check-pop)
+    (advice-add 'other-window :around
+                #'enkan-repl-buffer-restriction--check-other-window)
+    (advice-add 'select-window :around
+                #'enkan-repl-buffer-restriction--check-select-window)
     
     ;; Set up mode line indicator
     (enkan-repl-buffer-restriction--setup-mode-line)
@@ -225,6 +384,10 @@ This prevents navigation to *enkan-eat* and *claudemacs:* buffers."
                    #'enkan-repl-buffer-restriction--check-display)
     (advice-remove 'pop-to-buffer
                    #'enkan-repl-buffer-restriction--check-pop)
+    (advice-remove 'other-window
+                   #'enkan-repl-buffer-restriction--check-other-window)
+    (advice-remove 'select-window
+                   #'enkan-repl-buffer-restriction--check-select-window)
     
     (message "Buffer restriction mode disabled")))
 

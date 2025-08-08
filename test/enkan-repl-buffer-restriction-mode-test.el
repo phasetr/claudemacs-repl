@@ -2,185 +2,304 @@
 
 ;;; Commentary:
 
-;; Test suite for enkan-repl-buffer-restriction-mode.
-;; Tests pattern matching, buffer detection, and mode activation.
+;; TDD test suite for enkan-repl-buffer-restriction-mode.
+;; 期待する動作:
+;; 1. 制限モードON時、*claudemacs*や*enkan-eat*バッファへの移動を防ぐ
+;; 2. other-windowでも制限バッファへの移動を防ぐ
+;; 3. 制限バッファを開こうとしたらレイアウト設定（入力ファイル左、claudemacs右）
+;; 4. 重複バッファを作らない
+;; 5. モードOFF時は通常通り移動可能
 
 ;;; Code:
 
 (require 'ert)
 (require 'enkan-repl-buffer-restriction-mode)
 
-;;;; Pattern Matching Tests
+;;;; Test Helpers
 
-(ert-deftest test-enkan-repl-buffer-restriction--match-pattern-p ()
-  "Test pattern matching for buffer names."
-  ;; Test matching *enkan-eat* patterns
-  (should (enkan-repl-buffer-restriction--match-pattern-p
-           "*enkan-eat*"
-           enkan-repl-buffer-restriction-patterns))
-  (should (enkan-repl-buffer-restriction--match-pattern-p
-           "*enkan-eat-session1*"
-           enkan-repl-buffer-restriction-patterns))
-  (should (enkan-repl-buffer-restriction--match-pattern-p
-           "*enkan-eat-project-name*"
-           enkan-repl-buffer-restriction-patterns))
-  
-  ;; Test matching *claudemacs:* patterns
-  (should (enkan-repl-buffer-restriction--match-pattern-p
-           "*claudemacs:test*"
-           enkan-repl-buffer-restriction-patterns))
-  (should (enkan-repl-buffer-restriction--match-pattern-p
-           "*claudemacs:/Users/test/project*"
-           enkan-repl-buffer-restriction-patterns))
-  
-  ;; Test non-matching patterns
-  (should-not (enkan-repl-buffer-restriction--match-pattern-p
-               "*eat*"
-               enkan-repl-buffer-restriction-patterns))
-  (should-not (enkan-repl-buffer-restriction--match-pattern-p
-               "*scratch*"
-               enkan-repl-buffer-restriction-patterns))
-  (should-not (enkan-repl-buffer-restriction--match-pattern-p
-               "normal-buffer.el"
-               enkan-repl-buffer-restriction-patterns)))
+(defmacro with-test-buffers (&rest body)
+  "テスト用バッファを作成して、テスト後にクリーンアップする."
+  `(let ((test-claudemacs (get-buffer-create "*claudemacs*"))
+         (test-eat (get-buffer-create "*enkan-eat*"))
+         (test-input (get-buffer-create "enkan--test-project.org"))
+         (test-normal (get-buffer-create "normal.txt")))
+     (unwind-protect
+         (progn
+           ;; モードを確実にOFFから開始
+           (when enkan-repl-buffer-restriction-mode
+             (enkan-repl-buffer-restriction-mode-off))
+           ,@body)
+       ;; クリーンアップ
+       (when enkan-repl-buffer-restriction-mode
+         (enkan-repl-buffer-restriction-mode-off))
+       (kill-buffer test-claudemacs)
+       (kill-buffer test-eat)
+       (kill-buffer test-input)
+       (kill-buffer test-normal))))
 
-;;;; Buffer Detection Tests
+;;;; 期待動作1: 制限モードON時、制限バッファへの移動を防ぐ
 
-(ert-deftest test-enkan-repl-buffer-restriction--is-restricted-buffer-p ()
-  "Test restricted buffer detection."
-  (let ((test-buffers
-         '(("*enkan-eat*" . t)
-           ("*enkan-eat-test*" . t)
-           ("*claudemacs:dir*" . t)
-           ("*eat*" . nil)
-           ("*scratch*" . nil))))
-    (dolist (test test-buffers)
-      (let* ((buffer-name (car test))
-             (expected (cdr test))
-             (buffer (get-buffer-create buffer-name)))
-        (unwind-protect
-            (if expected
-                (should (enkan-repl-buffer-restriction--is-restricted-buffer-p buffer))
-              (should-not (enkan-repl-buffer-restriction--is-restricted-buffer-p buffer)))
-          (kill-buffer buffer))))))
+(ert-deftest test-switch-to-restricted-buffer-blocked ()
+  "制限モードON時、*claudemacs*への切り替えがブロックされる."
+  (with-test-buffers
+   (switch-to-buffer "normal.txt")
+   (enkan-repl-buffer-restriction-mode-on)
+   
+   ;; claudemacsへの切り替えを試みる
+   (switch-to-buffer "*claudemacs*")
+   
+   ;; claudemacsに移動していないことを確認
+   (should-not (string= (buffer-name) "*claudemacs*"))
+   ;; 制限されていないバッファにいることを確認
+   (should-not (enkan-repl-buffer-restriction--is-restricted-buffer-p
+                (current-buffer)))))
 
-;;;; Mode Activation Tests
+(ert-deftest test-switch-to-eat-buffer-blocked ()
+  "制限モードON時、*enkan-eat*への切り替えがブロックされる."
+  (with-test-buffers
+   (switch-to-buffer "normal.txt")
+   (enkan-repl-buffer-restriction-mode-on)
+   
+   ;; enkan-eatへの切り替えを試みる
+   (switch-to-buffer "*enkan-eat*")
+   
+   ;; enkan-eatに移動していないことを確認
+   (should-not (string= (buffer-name) "*enkan-eat*"))
+   ;; 制限されていないバッファにいることを確認
+   (should-not (enkan-repl-buffer-restriction--is-restricted-buffer-p
+                (current-buffer)))))
 
-(ert-deftest test-enkan-repl-buffer-restriction-mode-activation ()
-  "Test mode activation and deactivation."
-  ;; Start with mode off
-  (enkan-repl-buffer-restriction-mode-off)
-  (should-not enkan-repl-buffer-restriction-mode)
-  
-  ;; Turn mode on
-  (enkan-repl-buffer-restriction-mode-on)
-  (should enkan-repl-buffer-restriction-mode)
-  
-  ;; Turn mode on again (should be idempotent)
-  (enkan-repl-buffer-restriction-mode-on)
-  (should enkan-repl-buffer-restriction-mode)
-  
-  ;; Turn mode off
-  (enkan-repl-buffer-restriction-mode-off)
-  (should-not enkan-repl-buffer-restriction-mode)
-  
-  ;; Turn mode off again (should be idempotent)
-  (enkan-repl-buffer-restriction-mode-off)
-  (should-not enkan-repl-buffer-restriction-mode))
+;;;; 期待動作2: other-windowでも制限バッファへの移動を防ぐ
 
-;;;; Advice Tests
+(ert-deftest test-other-window-to-restricted-blocked ()
+  "other-windowで制限バッファへの移動がブロックされる."
+  (with-test-buffers
+   ;; 2つのウィンドウを設定
+   (delete-other-windows)
+   (switch-to-buffer "normal.txt")
+   (split-window-right)
+   (other-window 1)
+   (switch-to-buffer "*claudemacs*")
+   (other-window -1)
+   
+   ;; 制限モードを有効化
+   (enkan-repl-buffer-restriction-mode-on)
+   
+   ;; 左ウィンドウにいることを確認
+   (should (string= (buffer-name) "normal.txt"))
+   
+   ;; other-windowで移動を試みる
+   (other-window 1)
+   
+   ;; claudemacsに移動していないことを確認
+   (should-not (string= (buffer-name) "*claudemacs*"))
+   ;; 制限されていないバッファにいることを確認  
+   (should-not (enkan-repl-buffer-restriction--is-restricted-buffer-p
+                (current-buffer)))))
 
-(ert-deftest test-enkan-repl-buffer-restriction-advice ()
-  "Test that advice is properly added and removed."
-  ;; Start with mode off
-  (enkan-repl-buffer-restriction-mode-off)
-  
-  ;; Check no advice initially
-  (should-not (advice-member-p #'enkan-repl-buffer-restriction--check-switch
-                               'switch-to-buffer))
-  (should-not (advice-member-p #'enkan-repl-buffer-restriction--check-display
-                               'display-buffer))
-  (should-not (advice-member-p #'enkan-repl-buffer-restriction--check-pop
-                               'pop-to-buffer))
-  
-  ;; Enable mode
-  (enkan-repl-buffer-restriction-mode-on)
-  
-  ;; Check advice is added
-  (should (advice-member-p #'enkan-repl-buffer-restriction--check-switch
-                          'switch-to-buffer))
-  (should (advice-member-p #'enkan-repl-buffer-restriction--check-display
-                          'display-buffer))
-  (should (advice-member-p #'enkan-repl-buffer-restriction--check-pop
-                          'pop-to-buffer))
-  
-  ;; Disable mode
-  (enkan-repl-buffer-restriction-mode-off)
-  
-  ;; Check advice is removed
-  (should-not (advice-member-p #'enkan-repl-buffer-restriction--check-switch
-                               'switch-to-buffer))
-  (should-not (advice-member-p #'enkan-repl-buffer-restriction--check-display
-                               'display-buffer))
-  (should-not (advice-member-p #'enkan-repl-buffer-restriction--check-pop
-                               'pop-to-buffer)))
+;;;; 期待動作3: 制限バッファを開こうとしたらレイアウト設定
 
-;;;; Integration Tests
+(ert-deftest test-single-window-triggers-layout ()
+  "無関係なファイルから制限バッファを開くと入力ファイルと制限バッファのレイアウトが設定される."
+  (with-test-buffers
+   (delete-other-windows)
+   (switch-to-buffer "normal.txt")
+   (enkan-repl-buffer-restriction-mode-on)
+   
+   ;; 単一ウィンドウであることを確認
+   (should (= (length (window-list)) 1))
+   
+   ;; 制限バッファを開こうとする（作業開始の意図）
+   (switch-to-buffer "*claudemacs*")
+   
+   ;; 2つのウィンドウになっていることを確認（左:入力ファイル、右:claudemacs）
+   (should (= (length (window-list)) 2))
+   
+   ;; 左ウィンドウ（入力ファイル）にいることを確認
+   ;; 入力ファイルは enkan-- で始まるか、*scratch* などの非制限バッファ
+   (should-not (enkan-repl-buffer-restriction--is-restricted-buffer-p
+                (current-buffer)))
+   
+   ;; 右ウィンドウが存在する場合の確認（claudemacsがない場合は元のバッファのまま）
+   (when (> (length (window-list)) 1)
+     (other-window 1)
+     ;; claudemacsバッファまたは元のバッファ
+     (should (or (string-match-p "\\*claudemacs\\*" (buffer-name))
+                 (string= (buffer-name) "normal.txt")))
+     (other-window -1))))
 
-(ert-deftest test-enkan-repl-buffer-restriction-integration ()
-  "Test buffer switching restriction in practice."
-  (let ((restricted-buffer (get-buffer-create "*enkan-eat-test*"))
-        (normal-buffer (get-buffer-create "*test-normal*"))
-        (original-buffer (current-buffer)))
-    (unwind-protect
-        (progn
-          ;; Enable restriction mode
-          (enkan-repl-buffer-restriction-mode-on)
-          
-          ;; Try to switch to normal buffer (should work)
-          (switch-to-buffer normal-buffer)
-          (should (eq (current-buffer) normal-buffer))
-          
-          ;; Try to switch to restricted buffer (should be blocked)
-          ;; Note: In actual use, this would redirect. For testing,
-          ;; we just verify the buffer is detected as restricted
-          (should (enkan-repl-buffer-restriction--is-restricted-buffer-p
-                  restricted-buffer))
-          
-          ;; Disable mode
-          (enkan-repl-buffer-restriction-mode-off)
-          
-          ;; Now switching should work
-          (switch-to-buffer restricted-buffer)
-          (should (eq (current-buffer) restricted-buffer)))
-      ;; Cleanup
-      (switch-to-buffer original-buffer)
-      (kill-buffer restricted-buffer)
-      (kill-buffer normal-buffer)
-      (enkan-repl-buffer-restriction-mode-off))))
+;;;; 期待動作4: 重複バッファを作らない
 
-;;;; Custom Pattern Tests
+(ert-deftest test-no-duplicate-input-buffers ()
+  "同じ入力ファイルバッファを重複作成しない."
+  (with-test-buffers
+   (delete-other-windows)
+   (switch-to-buffer "normal.txt")
+   (enkan-repl-buffer-restriction-mode-on)
+   
+   ;; 最初のenkan--バッファ数を記録
+   (let ((initial-enkan-count
+          (cl-count-if (lambda (buf)
+                         (string-match-p "^enkan--" (buffer-name buf)))
+                       (buffer-list))))
+     
+     ;; 複数回制限バッファを開こうとする
+     (switch-to-buffer "*claudemacs*")
+     (switch-to-buffer "*claudemacs*")
+     (switch-to-buffer "*enkan-eat*")
+     
+     ;; enkan--バッファが増えていないことを確認
+     (let ((final-enkan-count
+            (cl-count-if (lambda (buf)
+                           (string-match-p "^enkan--" (buffer-name buf)))
+                         (buffer-list))))
+       ;; 増えていないか、1つだけ増えた（初回作成）
+       (should (<= (- final-enkan-count initial-enkan-count) 1))))))
 
-(ert-deftest test-enkan-repl-buffer-restriction-custom-patterns ()
-  "Test customization of restriction patterns."
-  (let ((original-patterns enkan-repl-buffer-restriction-patterns))
-    (unwind-protect
-        (progn
-          ;; Add custom pattern
-          (setq enkan-repl-buffer-restriction-patterns
-                '("^\\*enkan-eat" "^\\*claudemacs:" "^\\*custom-"))
-          
-          ;; Test new pattern works
-          (should (enkan-repl-buffer-restriction--match-pattern-p
-                  "*custom-test*"
-                  enkan-repl-buffer-restriction-patterns))
-          
-          ;; Original patterns still work
-          (should (enkan-repl-buffer-restriction--match-pattern-p
-                  "*enkan-eat*"
-                  enkan-repl-buffer-restriction-patterns)))
-      ;; Restore original patterns
-      (setq enkan-repl-buffer-restriction-patterns original-patterns))))
+;;;; 期待動作5: モードOFF時は通常通り移動可能
+
+(ert-deftest test-mode-off-allows-all-navigation ()
+  "モードOFF時はすべてのバッファへ移動可能."
+  (with-test-buffers
+   ;; モードをOFFにする
+   (enkan-repl-buffer-restriction-mode-off)
+   
+   ;; claudemacsへ移動可能
+   (switch-to-buffer "*claudemacs*")
+   (should (string= (buffer-name) "*claudemacs*"))
+   
+   ;; enkan-eatへ移動可能
+   (switch-to-buffer "*enkan-eat*")
+   (should (string= (buffer-name) "*enkan-eat*"))
+   
+   ;; 通常バッファへも移動可能
+   (switch-to-buffer "normal.txt")
+   (should (string= (buffer-name) "normal.txt"))))
+
+(ert-deftest test-mode-off-allows-other-window ()
+  "モードOFF時はother-windowで制限バッファへ移動可能."
+  (with-test-buffers
+   ;; 2ウィンドウ設定
+   (delete-other-windows)
+   (switch-to-buffer "normal.txt")
+   (split-window-right)
+   (other-window 1)
+   (switch-to-buffer "*claudemacs*")
+   (other-window -1)
+   
+   ;; モードOFF
+   (enkan-repl-buffer-restriction-mode-off)
+   
+   ;; other-windowで移動可能
+   (other-window 1)
+   (should (string= (buffer-name) "*claudemacs*"))))
+
+;;;; その他のテスト
+
+(ert-deftest test-normal-buffer-navigation-allowed ()
+  "制限モードON時でも通常バッファへは移動可能."
+  (with-test-buffers
+   (switch-to-buffer "normal.txt")
+   (enkan-repl-buffer-restriction-mode-on)
+   
+   ;; 入力ファイルへ移動可能
+   (switch-to-buffer "enkan--test-project.org")
+   (should (string= (buffer-name) "enkan--test-project.org"))
+   
+   ;; 通常ファイルへ戻れる
+   (switch-to-buffer "normal.txt")
+   (should (string= (buffer-name) "normal.txt"))))
+
+(ert-deftest test-pattern-matching ()
+  "パターンマッチングが正しく動作する."
+  (with-test-buffers
+   ;; 制限対象
+   (should (enkan-repl-buffer-restriction--is-restricted-buffer-p
+            (get-buffer "*claudemacs*")))
+   (should (enkan-repl-buffer-restriction--is-restricted-buffer-p
+            (get-buffer "*enkan-eat*")))
+   
+   ;; 制限対象外
+   (should-not (enkan-repl-buffer-restriction--is-restricted-buffer-p
+                (get-buffer "normal.txt")))
+   (should-not (enkan-repl-buffer-restriction--is-restricted-buffer-p
+                (get-buffer "enkan--test-project.org")))))
+
+(ert-deftest test-correct-directory-claudemacs-buffer ()
+  "正しいディレクトリのclaudemacsバッファが開かれる.
+enkan--Users--sekine--.emacs.d.orgから対応する*claudemacs*を開く."
+  (with-test-buffers
+   ;; .emacs.dディレクトリ用の入力ファイルとclaudemacsを作成
+   (let ((emacs-input (get-buffer-create "enkan--Users--sekine--.emacs.d.org"))
+         (emacs-claudemacs (get-buffer-create "*claudemacs:/Users/sekine/.emacs.d*"))
+         ;; 別ディレクトリのバッファも作成（間違って開かれないことを確認）
+         (repl-input (get-buffer-create "enkan--Users--sekine--dev--self--enkan-repl.org"))
+         (repl-claudemacs (get-buffer-create "*claudemacs:/Users/sekine/dev/self/enkan-repl*")))
+     
+     (unwind-protect
+         (progn
+           ;; .emacs.d用バッファのディレクトリを設定
+           (with-current-buffer emacs-claudemacs
+             (setq default-directory "/Users/sekine/.emacs.d/"))
+           (with-current-buffer repl-claudemacs
+             (setq default-directory "/Users/sekine/dev/self/enkan-repl/"))
+           
+           ;; .emacs.dの入力ファイルから開始
+           (delete-other-windows)
+           (switch-to-buffer emacs-input)
+           (enkan-repl-buffer-restriction-mode-on)
+           
+           ;; claudemacsを開こうとする
+           (switch-to-buffer "*claudemacs:/Users/sekine/.emacs.d*")
+           
+           ;; レイアウトが設定されたことを確認
+           (should (= (length (window-list)) 2))
+           
+           ;; 左ウィンドウが正しい入力ファイル
+           (should (string-match-p "enkan--Users--sekine--.emacs.d" (buffer-name)))
+           
+           ;; 右ウィンドウが正しいclaudemacs
+           ;; 制限モードをOFFにしてから確認
+           (enkan-repl-buffer-restriction-mode-off)
+           (other-window 1)
+           (should (string= (buffer-name) "*claudemacs:/Users/sekine/.emacs.d*"))
+           (other-window -1)
+           (enkan-repl-buffer-restriction-mode-on))
+       
+       ;; クリーンアップ
+       (kill-buffer emacs-input)
+       (kill-buffer emacs-claudemacs)
+       (kill-buffer repl-input)
+       (kill-buffer repl-claudemacs)))))
+
+(ert-deftest test-no-scratch-buffer-opened ()
+  "*scratch*バッファが開かれないことを確認.
+入力ファイルが見つからない場合でも*scratch*を開かない."
+  (with-test-buffers
+   ;; 存在しないディレクトリのclaudemacsバッファを作成
+   (let ((nonexistent-claudemacs (get-buffer-create "*claudemacs:/nonexistent/path*")))
+     (unwind-protect
+         (progn
+           (with-current-buffer nonexistent-claudemacs
+             (setq default-directory "/nonexistent/path/"))
+           
+           ;; 無関係なファイルから開始
+           (delete-other-windows)
+           (switch-to-buffer "normal.txt")
+           (enkan-repl-buffer-restriction-mode-on)
+           
+           ;; claudemacsを開こうとする
+           (switch-to-buffer "*claudemacs:/nonexistent/path*")
+           
+           ;; *scratch*が開かれていないことを確認
+           (should-not (string= (buffer-name) "*scratch*"))
+           
+           ;; どのウィンドウにも*scratch*がないことを確認
+           (dolist (win (window-list))
+             (should-not (string= (buffer-name (window-buffer win)) "*scratch*"))))
+       
+       ;; クリーンアップ
+       (kill-buffer nonexistent-claudemacs)))))
 
 (provide 'enkan-repl-buffer-restriction-mode-test)
 
