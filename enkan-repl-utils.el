@@ -354,6 +354,31 @@ Returns org-mode formatted string with functions organized by category."
         (setq result (concat result (enkan-repl-utils--generate-org-section category functions header-level)))))
     result))
 
+;; Additional pure functions for session management tests
+
+(defun enkan-repl--validate-session-selection-pure (selection candidates)
+  "Pure function to validate session selection against candidates.
+SELECTION is the selected string.
+CANDIDATES is a list of valid candidate strings.
+Returns non-nil if selection is valid."
+  (member selection candidates))
+
+(defun enkan-repl--format-session-list-pure (sessions)
+  "Pure function to format session list for display.
+SESSIONS is a list of plists with :name, :directory, :status.
+Returns formatted string."
+  (mapconcat
+   (lambda (session)
+     (let ((name (plist-get session :name))
+           (status (plist-get session :status)))
+       (format "%s [%s]" 
+               (if (string-match "\\*enkan:\\(.*?\\)\\*" name)
+                   (match-string 1 name)
+                 name)
+               (upcase (symbol-name status)))))
+   sessions
+   "\n"))
+
 (provide 'enkan-repl-utils)
 
 ;;; enkan-repl-utils.el ends here

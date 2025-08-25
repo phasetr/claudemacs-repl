@@ -166,8 +166,66 @@ When set to a file path, uses that file as the template."
   '(choice
     (const :tag "Use default template" nil)
     (file :tag "Custom template file"))
-  :group
-  'enkan-repl)
+  :group 'enkan-repl)
+
+;;;; Multi-buffer access variables
+
+(defcustom enkan-repl-center-file nil
+  "Center file path for multi-session management.
+When nil, multi-session functionality is disabled."
+  :type '(choice (const :tag "Multi-session functionality disabled" nil)
+                 (file :tag "Center file path"))
+  :group 'enkan-repl)
+
+(defcustom enkan-repl-project-aliases nil
+  "Project name alias definitions.
+Supports both global and buffer-local configuration.
+Example: \\='((\"pt\" . \"pt-tools\") (\"er\" . \"enkan-repl\"))"
+  :type '(alist :key-type string :value-type string)
+  :group 'enkan-repl)
+
+(defcustom enkan-repl-center-project-registry nil
+  "Project startup registry for center file functionality.
+Each element is in the format (alias . (project-name . project-path)).
+Example: \\='((\"pt\" . (\"pt-tools\" . \"/path/to/pt-tools\"))
+      (\"er\" . (\"enkan-repl\" . \"/path/to/enkan-repl\"))
+      (\"cc\" . (\"claude-code\" . \"/path/to/claude-code\")))"
+  :type '(alist :key-type string
+                :value-type (cons string string))
+  :group 'enkan-repl)
+
+(defcustom enkan-repl-center-multi-project-layouts nil
+  "Configuration list for frequently used multi-project simultaneous startup.
+Each element is in the format (configuration-name . alias-list).
+Aliases are specified from left to right according to window layout.
+Example: \\='((\"web-dev\" . (\"er\" \"pt\" \"cc\"))
+      (\"data-analysis\" . (\"pt\" \"jupyter\" \"postgres\")))"
+  :type '(alist :key-type string
+                :value-type (repeat string))
+  :group 'enkan-repl)
+
+(defcustom enkan-repl-session-list nil
+  "List of managed sessions.
+Each element is in the format (number . project-name).
+Internally uses 4-7, displayed to users as 1-4.
+Example: \\='((4 . \"pt-tools\") (5 . \"enkan-repl\") (6 . \"claude-code\") (7 . \"web-app\"))"
+  :type '(alist :key-type integer :value-type string)
+  :group 'enkan-repl)
+
+(defcustom enkan-repl-default-session-projects nil
+  "Alist of default session projects to open.
+Example: \\='((4 . \"project1\") (5 . \"project2\") (6 . \"project3\") (7 . \"project4\"))."
+  :type '(alist :key-type integer :value-type string)
+  :group 'enkan-repl)
+
+;;;; Multi-buffer access variables (continued)
+
+(defvar enkan-repl--session-counter 0
+  "Session startup counter (for automatic numbering).")
+
+(defvar enkan-repl--current-multi-project-layout nil
+  "Currently selected multi-project-layout name.
+When nil, executes normal setup behavior.")
 
 ;;;; Core Functions
 
@@ -467,11 +525,11 @@ interpretation issues and Mac region selection problems."
        (if (string-match-p "~/[^[:space:]]*\\.[a-zA-Z0-9]+\\'" sanitized) "YES" "NO"))
       (enkan-repl--debug-message
        "Punctuation pattern match: %s"
-       (if (string-match-p "[.!?。！？]\\'" sanitized) "YES" "NO"))
+       (if (string-match-p "[.!?]\\'" sanitized) "YES" "NO"))
       (when
           (and
            (string-match-p "~/[^[:space:]]*\\.[a-zA-Z0-9]+\\'" sanitized)
-           (not (string-match-p "[.!?。！？]\\'" sanitized)))
+           (not (string-match-p "[.!?]\\'" sanitized)))
         (enkan-repl--debug-message "Adding end marker to prevent file path interpretation")
         (setq sanitized (concat sanitized "\n(This text is added by enkan-repl as a workaround for Claude Code's special interpretation of file paths)")))
       ;; Only remove trailing whitespace/newlines
@@ -486,15 +544,211 @@ interpretation issues and Mac region selection problems."
   "Get the target directory for current buffer.
 For persistent files, extract directory from filename.
 For other buffers, use current `default-directory'."
-  (if
-      (and
-       buffer-file-name
-       (string-match-p "enkan-.+\\.org$" (file-name-nondirectory buffer-file-name)))
-      ;; This is a persistent file, extract directory from filename
-      (enkan-repl--decode-full-path
-       (file-name-base (file-name-nondirectory buffer-file-name)))
-    ;; Use current directory
-    default-directory))
+  (cond
+   ;; Center file case - use current directory
+   ((and buffer-file-name
+         enkan-repl-center-file
+         (string= (expand-file-name buffer-file-name)
+                  (expand-file-name enkan-repl-center-file)))
+    default-directory)
+   ;; Regular persistent file case
+   ((and buffer-file-name
+         (string-match-p "enkan-.+\\.org$" (file-name-nondirectory buffer-file-name)))
+    ;; This is a persistent file, extract directory from filename
+    (enkan-repl--decode-full-path
+     (file-name-base (file-name-nondirectory buffer-file-name))))
+   ;; Default case
+   (t default-directory)))
+
+;;;; Multi-buffer access core functions
+
+(defun enkan-repl--extract-project-name (buffer-name-or-path)
+  "Extract final directory name from buffer name or path for use as project name.
+Example: \\='*enkan:/path/to/pt-tools/*\\=' -> \\='pt-tools\\='"
+  (let ((path (if (string-match "\\*enkan:\\(.+\\)\\*" buffer-name-or-path)
+                  (match-string 1 buffer-name-or-path)
+                buffer-name-or-path)))
+    (file-name-nondirectory (directory-file-name path))))
+
+(defun enkan-repl--resolve-project-name (name-or-alias)
+  "Resolve project name or alias to canonical project name.
+References alias definitions, returns original name if not found."
+  (or (cdr (assoc name-or-alias enkan-repl-project-aliases))
+      name-or-alias))
+
+(defun enkan-repl--center-resolve-project-name (alias)
+  "Alias resolution for center file functionality.
+Resolves alias to canonical project name from project aliases."
+  (or (cdr (assoc alias enkan-repl-project-aliases))
+      alias))
+
+(defun enkan-repl--get-project-directory-from-registry (alias)
+  "Get directory path from project registry.
+Returns: Directory path or nil"
+  (let ((project-info (cdr (assoc alias enkan-repl-center-project-registry))))
+    (when project-info
+      (cdr project-info))))  ; project-path part
+
+(defun enkan-repl--handle-prefix-target-not-found (prefix-target command content-description)
+  "Handle case when prefix target is not found.
+1. Get directory path from project registry
+2. Start session if directory exists
+3. Show error message if not found"
+  (let ((project-dir (enkan-repl--get-project-directory-from-registry prefix-target)))
+    (cond
+     ;; Project directory exists in registry and is accessible
+     ((and project-dir (file-directory-p project-dir))
+      (let ((default-directory project-dir))
+        (enkan-repl-start-eat)
+        (message "Started session for %s at %s" prefix-target project-dir)
+        ;; Send command after brief delay following session startup
+        (run-at-time 0.5 nil
+                     (lambda (cmd dir desc target)
+                       (when (enkan-repl--send-text cmd dir)
+                         (message "%s sent to %s (%d characters)"
+                                  desc target (length cmd))))
+                     command project-dir content-description prefix-target)))
+     ;; Project exists in registry but directory not found
+     (project-dir
+      (message "❌ Project '%s' directory not found: %s. Check enkan-repl-center-project-registry."
+               prefix-target project-dir))
+     ;; Project not found in registry
+     (t
+      (message "❌ Project '%s' not found. Check enkan-repl-project-aliases and enkan-repl-center-project-registry."
+               prefix-target)))))
+
+(defun enkan-repl--get-session-by-user-number (user-number)
+  "Get project name from user number.
+user-number: Integer 1-4 (position from left in eat sessions)
+Returns: Project name or nil"
+  (let ((internal-number (+ user-number 3)))  ; 1→4, 2→5, 3→6, 4→7
+    (cdr (assoc internal-number enkan-repl-session-list))))
+
+(defun enkan-repl--register-session (session-number project-name)
+  "Register project to session number.
+Order is maintained by session number (ascending)."
+  (let ((updated-list (assq-delete-all session-number enkan-repl-session-list))
+        (new-entry (cons session-number project-name)))
+    (setq enkan-repl-session-list
+          (sort (cons new-entry updated-list)
+                (lambda (a b) (< (car a) (car b)))))))
+
+(defun enkan-repl--auto-register-session (project-name)
+  "Automatically register session with number.
+Executes only when no existing number assignment exists.
+project-name: Alias-resolved canonical project name"
+  (let ((resolved-name (enkan-repl--resolve-project-name project-name)))
+    (unless (rassoc resolved-name enkan-repl-session-list)
+      (let ((next-number (+ 4 (mod enkan-repl--session-counter 4))))
+        (setq enkan-repl--session-counter (1+ enkan-repl--session-counter))
+        (when (<= next-number 7)
+          (enkan-repl--register-session next-number resolved-name))))))
+
+(defun enkan-repl--get-session-by-name-or-alias (name-or-alias)
+  "Get session number from project name or alias.
+Returns: Session number or nil"
+  (let ((resolved-name (enkan-repl--resolve-project-name name-or-alias)))
+    (car (rassoc resolved-name enkan-repl-session-list))))
+
+(defun enkan-repl--register-session-with-alias-support (session-number name-or-alias)
+  "Alias-aware session registration.
+name-or-alias: Project name or alias
+Register with canonical name after alias resolution"
+  (let ((resolved-name (enkan-repl--resolve-project-name name-or-alias)))
+    (enkan-repl--register-session session-number resolved-name)))
+
+(defun enkan-repl--parse-prefix-notation (text)
+  "Parse prefix notation (:symbol).
+Returns: (target . command) cons
+  target: Project name/alias/number, or nil (no prefix)
+  command: Command execution part"
+  (if (string-match "^:\\([^ \t]+\\)[ \t]+\\(.*\\)" text)
+      (cons (match-string 1 text) (match-string 2 text))
+    (cons nil text)))
+
+(defun enkan-repl--resolve-target-to-directory (target)
+  "Resolve send target to directory path.
+target: Project name, alias, or number 1-4
+Returns: Directory path or nil"
+  (cond
+   ;; Numeric case (1-4)
+   ((and (stringp target) (string-match "^[1-4]$" target))
+    (let* ((user-number (string-to-number target))
+           (project-name (enkan-repl--get-session-by-user-number user-number)))
+      (when project-name
+        (enkan-repl--find-directory-by-project-name project-name))))
+   ;; Project name or alias
+   ((stringp target)
+    (let ((resolved-name (enkan-repl--center-resolve-project-name target)))
+      (enkan-repl--find-directory-by-project-name resolved-name)))
+   ;; Other (no prefix)
+   (t default-directory)))
+
+(defun enkan-repl--extract-directory-from-buffer-name-pure (buffer-name)
+  "Pure function to extract expanded directory path from enkan buffer name.
+Returns expanded directory path or nil if buffer name is not valid enkan format."
+  (when (and (stringp buffer-name) (string-match "^\\*enkan:\\(.*\\)\\*$" buffer-name))
+    (let ((raw-path (match-string 1 buffer-name)))
+      (file-name-as-directory (expand-file-name raw-path)))))
+
+(defun enkan-repl--find-directory-by-project-name (project-name)
+  "Search for corresponding directory by project name.
+Looks for matching directory from existing enkan-repl buffers.
+Returns: Directory path or nil"
+  (cl-block search-buffers
+    (dolist (buffer (buffer-list))
+      (with-current-buffer buffer
+        (when (and (string-match "^\\*enkan:" (buffer-name))
+                   (string-equal project-name
+                                (enkan-repl--extract-project-name (buffer-name))))
+          (cl-return-from search-buffers
+            (enkan-repl--extract-directory-from-buffer-name-pure (buffer-name))))))))
+
+(defun enkan-repl--send-region-with-prefix (start end user-number)
+  "Select session according to universal argument and send region.
+user-number: Integer 1-4 (position from left in eat sessions)"
+  (let* ((text (buffer-substring-no-properties start end))
+         (parsed (enkan-repl--parse-prefix-notation text))
+         (prefix-target (car parsed))
+         (command (cdr parsed)))
+    (cond
+     ;; Prefix notation takes precedence when present
+     (prefix-target
+      (let ((directory (enkan-repl--resolve-target-to-directory prefix-target)))
+        (if directory
+            (progn
+              ;; Send command to target session
+              (enkan-repl--send-text command directory)
+              ;; Buffer content unchanged (preserve :pt part)
+              )
+          ;; Handle target not found properly
+          (enkan-repl--handle-prefix-target-not-found
+           prefix-target command "Region"))))
+     ;; Use user number when no prefix notation
+     (t
+      (let ((project-name (enkan-repl--get-session-by-user-number user-number)))
+        (if project-name
+            (let ((directory (enkan-repl--find-directory-by-project-name project-name)))
+              (if directory
+                  (enkan-repl--send-text text directory)
+                (user-error "Directory for session %d (%s) not found" user-number project-name)))
+          (user-error "Session %d is not registered" user-number)))))))
+
+(defun enkan-repl--send-text-to-project (text project-name)
+  "Send text to session of specified project name."
+  (let ((directory (enkan-repl--find-directory-by-project-name project-name)))
+    (if directory
+        (enkan-repl--send-text text directory)
+      (user-error "Directory for project '%s' not found" project-name))))
+
+(defun enkan-repl--buffer-matches-directory-pure (buffer-name target-directory)
+  "Pure function to check if buffer name matches target directory.
+Returns t if buffer is enkan buffer for target directory, nil otherwise."
+  (and (stringp buffer-name)
+       (stringp target-directory)
+       (string-match-p "^\\*enkan:" buffer-name)
+       (let ((expanded-target (expand-file-name target-directory)))
+         (string-prefix-p (concat "*enkan:" expanded-target) buffer-name))))
 
 (defun enkan-repl--get-buffer-for-directory (&optional directory)
   "Get the eat buffer for DIRECTORY if it exists and is live.
@@ -512,11 +766,8 @@ If DIRECTORY is nil, use current `default-directory'."
           (when
               (and (buffer-live-p buf)
                    name     ; Ensure name is not nil
-                   ;; Check for directory-specific enkan buffer
-                   ;; Check for enkan eat buffers
-                   (and
-                    (string-match-p "^\\*enkan:" name)
-                    (string-prefix-p (concat "*enkan:" target-dir) name)))
+                   ;; Check for directory-specific enkan buffer using pure function
+                   (enkan-repl--buffer-matches-directory-pure name target-dir))
             (setq matching-buffer buf)
             (cl-return-from search-buffers)))))
     matching-buffer))
@@ -566,7 +817,7 @@ Otherwise, use current `default-directory'."
         (eat--send-string eat--process text)
         (eat--send-string eat--process "\r")
         ;; Move cursor to bottom after eat processes the output
-        (run-at-time 0.01 nil 
+        (run-at-time 0.01 nil
                      (lambda (buf)
                        (with-current-buffer buf
                          (goto-char (point-max))))
@@ -606,7 +857,7 @@ NUMBER should be a string (e.g., \\='1\\=', \\='2\\=', \\='3\\=') or empty strin
           (with-current-buffer session-buffer
             (eat--send-string eat--process "\e")
             ;; Move cursor to bottom after eat processes the output
-            (run-at-time 0.01 nil 
+            (run-at-time 0.01 nil
                          (lambda (buf)
                            (with-current-buffer buf
                              (goto-char (point-max))))
@@ -625,6 +876,11 @@ If SKIP-EMPTY-CHECK is non-nil, send content even if empty."
         (buffer-substring-no-properties start end))
        (content
         (enkan-repl--sanitize-content raw-content))
+       (is-center-file
+        (and buffer-file-name
+             enkan-repl-center-file
+             (string= (expand-file-name buffer-file-name)
+                      (expand-file-name enkan-repl-center-file))))
        (target-dir
         (enkan-repl--get-target-directory-for-buffer)))
     (enkan-repl--debug-message
@@ -632,39 +888,70 @@ If SKIP-EMPTY-CHECK is non-nil, send content even if empty."
      (length raw-content)
      (length content))
     (enkan-repl--debug-message
-     "Content empty?: %s, target-dir: %s"
+     "Content empty?: %s, target-dir: %s, is-center-file: %s"
      (= (length content) 0)
-     target-dir)
+     target-dir
+     is-center-file)
     (if
         (or skip-empty-check (and content (not (= (length content) 0))))
         (progn
           (enkan-repl--debug-message "Attempting to send content")
-          (if (enkan-repl--send-text content target-dir)
-              (message "%s sent (%d characters)"
-                       content-description (length content))
-            (message "❌ Cannot send - no matching eat session found for this directory")))
+          ;; Handle prefix notation for center files
+          (if is-center-file
+              (let* ((parsed (enkan-repl--parse-prefix-notation content))
+                     (prefix-target (car parsed))
+                     (command (cdr parsed)))
+                (if prefix-target
+                    ;; Center file with prefix notation
+                    (let ((directory (enkan-repl--resolve-target-to-directory prefix-target)))
+                      (if directory
+                          (progn
+                            ;; Send command to target session
+                            (enkan-repl--send-text command directory)
+                            ;; Buffer content unchanged (preserve :pt part)
+                            (message "%s sent to %s (%d characters)"
+                                     content-description prefix-target (length command)))
+                        ;; Handle target not found properly
+                        (enkan-repl--handle-prefix-target-not-found
+                         prefix-target command content-description)))
+                  ;; Center file without prefix - send to current directory
+                  (if (enkan-repl--send-text content target-dir)
+                      (message "%s sent (%d characters)"
+                               content-description (length content))
+                    (message "❌ Cannot send - no matching eat session found for this directory"))))
+            ;; Non-center file - regular behavior
+            (if (enkan-repl--send-text content target-dir)
+                (message "%s sent (%d characters)"
+                         content-description (length content))
+              (message "❌ Cannot send - no matching eat session found for this directory"))))
       (message "No content to send (empty or whitespace only)"))))
 
 ;;;; Public API - Send Functions
 
 ;;;###autoload
-(defun enkan-repl-send-region (start end)
+(defun enkan-repl-send-region (start end &optional arg)
   "Send the text in region from START to END to eat session.
+With prefix argument ARG (1-4), send to specific session number.
 
 Category: Text Sender"
-  (interactive "r")
+  (interactive "r\nP")
   (when (use-region-p)
-    (enkan-repl--send-buffer-content start end "Region")))
+    (if (and (numberp arg) (<= 1 arg 4))
+        (enkan-repl--send-region-with-prefix start end arg)
+      (enkan-repl--send-buffer-content start end "Region"))))
 
 ;;;###autoload
-(defun enkan-repl-send-buffer ()
+(defun enkan-repl-send-buffer (&optional arg)
   "Send the entire current buffer to eat session.
+With prefix argument ARG (1-4), send to specific session number.
 
 Category: Text Sender"
-  (interactive)
-  (enkan-repl--send-buffer-content
-   (point-min) (point-max)
-   (format "File %s" (buffer-name)) t))
+  (interactive "P")
+  (if (and (numberp arg) (<= 1 arg 4))
+      (enkan-repl--send-region-with-prefix (point-min) (point-max) arg)
+    (enkan-repl--send-buffer-content
+     (point-min) (point-max)
+     (format "File %s" (buffer-name)) t)))
 
 ;;;###autoload
 (defun enkan-repl-send-rest-of-buffer ()
@@ -675,13 +962,17 @@ Category: Text Sender"
   (enkan-repl--send-buffer-content (point) (point-max) "Rest of buffer"))
 
 ;;;###autoload
-(defun enkan-repl-send-line ()
+(defun enkan-repl-send-line (&optional arg)
   "Send the current line to eat session.
+With prefix argument ARG (1-4), send to specific session number.
 
 Category: Text Sender"
-  (interactive)
-  (enkan-repl--send-buffer-content
-   (line-beginning-position) (line-end-position) "Line"))
+  (interactive "P")
+  (if (and (numberp arg) (<= 1 arg 4))
+      (enkan-repl--send-region-with-prefix
+       (line-beginning-position) (line-end-position) arg)
+    (enkan-repl--send-buffer-content
+     (line-beginning-position) (line-end-position) "Line")))
 
 ;;;###autoload
 (defun enkan-repl-send-enter ()
@@ -714,6 +1005,22 @@ Category: Text Sender"
 Category: Text Sender"
   (interactive)
   (enkan-repl--send-numbered-choice "3"))
+
+;;;###autoload
+(defun enkan-repl-send-4 ()
+  "Send \\='4\\=' to eat session buffer for numbered choice prompt.
+
+Category: Text Sender"
+  (interactive)
+  (enkan-repl--send-numbered-choice "4"))
+
+;;;###autoload
+(defun enkan-repl-send-5 ()
+  "Send \\='5\\=' to eat session buffer for numbered choice prompt.
+
+Category: Text Sender"
+  (interactive)
+  (enkan-repl--send-numbered-choice "5"))
 
 ;;;###autoload
 (defun enkan-repl-send-escape ()
@@ -805,7 +1112,6 @@ Returns (target-dir existing-buffer can-send) as a list."
       (let ((can-send (enkan-repl--can-send-text target-dir)))
         (list target-dir existing-buffer can-send)))))
 
-
 (defun enkan-repl--handle-dead-session (existing-buffer target-dir prompt-format restart-func)
   "Handle dead session with user confirmation.
 EXISTING-BUFFER is the dead buffer to handle.
@@ -842,7 +1148,7 @@ Category: Session Controller"
          (target-dir (nth 0 session-info))
          (existing-buffer (nth 1 session-info))
          (can-send (nth 2 session-info))
-         (buffer-name (concat "*enkan:" target-dir "*")))
+         (buffer-name (concat "*enkan:" (expand-file-name target-dir) "*")))
     (cond
      ;; Active session already exists
      (can-send
@@ -923,22 +1229,49 @@ Category: Session Controller"
 
 ;;;###autoload
 (defun enkan-repl-setup ()
-  "Set up window layout with org file on left and eat on right.
-This is the author's preference - customize as needed.
+  "Set up window layout based on current multi-project configuration or default layout.
+For multi-project layouts, calls appropriate examples layout function.
+For simple layouts, sets up org file on left and eat on right.
 
 Category: Session Controller"
   (interactive)
-  (let
-      ((target-dir (enkan-repl--get-target-directory-for-buffer)))
-    (delete-other-windows)
-    (split-window-right)
-    (other-window 1)
-    (let ((session-buf (enkan-repl--get-buffer-for-directory target-dir)))
-      (if session-buf
-          (switch-to-buffer session-buf)
-        (message "eat session buffer not found. Run (enkan-repl-start-eat) first.")))
-    (other-window -1)
-    (message "Window layout setup complete")))
+  (if enkan-repl--current-multi-project-layout
+      ;; Multi-project layout is active - call appropriate examples layout function
+      (let* ((alias-list (cdr (assoc enkan-repl--current-multi-project-layout
+                                     enkan-repl-center-multi-project-layouts)))
+             (session-count (length alias-list)))
+        (delete-other-windows)
+        ;; Open center file first
+        (when enkan-repl-center-file
+          (find-file enkan-repl-center-file))
+        ;; Call appropriate layout function from examples
+        (cond
+         ((= session-count 2)
+          (if (fboundp 'enkan-repl-setup-2session-layout)
+              (enkan-repl-setup-2session-layout)
+            (error "enkan-repl-setup-2session-layout not available. Load center-window-navigation.el from examples.")))
+         ((= session-count 3)
+          (if (fboundp 'enkan-repl-setup-3session-layout)
+              (enkan-repl-setup-3session-layout)
+            (error "enkan-repl-setup-3session-layout not available. Load center-window-navigation.el from examples.")))
+         ((= session-count 4)
+          (if (fboundp 'enkan-repl-setup-4session-layout)
+              (enkan-repl-setup-4session-layout)
+            (error "enkan-repl-setup-4session-layout not available. Load center-window-navigation.el from examples.")))
+         (t (error "Invalid session count: %d" session-count)))
+        (message "Multi-project window layout setup complete: %s (%d sessions)"
+                 enkan-repl--current-multi-project-layout session-count))
+    ;; Normal setup behavior
+    (let ((target-dir (enkan-repl--get-target-directory-for-buffer)))
+      (delete-other-windows)
+      (split-window-right)
+      (other-window 1)
+      (let ((session-buf (enkan-repl--get-buffer-for-directory target-dir)))
+        (if session-buf
+            (switch-to-buffer session-buf)
+          (message "eat session buffer not found. Run (enkan-repl-start-eat) first.")))
+      (other-window -1)
+      (message "Window layout setup complete"))))
 
 ;;;###autoload
 (defun enkan-repl-output-template ()
@@ -983,7 +1316,7 @@ Category: Utilities"
       ((target-dir (enkan-repl--get-target-directory-for-buffer))
        (session-buffer (enkan-repl--get-buffer-for-directory target-dir))
        (can-send (enkan-repl--can-send-text target-dir))
-       (expected-session (concat "*enkan:" target-dir "*"))
+       (expected-session (concat "*enkan:" (expand-file-name target-dir) "*"))
        (all-buffers (buffer-list))
        (enkan-sessions
         (seq-filter
@@ -1192,6 +1525,1211 @@ Category: Command Palette"
       (let ((selected-command (completing-read "enkan-repl commands: " candidates)))
         (when selected-command
           (call-interactively (intern selected-command)))))))
+
+;;;; Center File Multi-buffer Access Commands
+
+;;;###autoload
+(defun enkan-repl-center-send-line-to-session-1 ()
+  "Send current line to session 1.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (enkan-repl--send-region-with-prefix
+   (line-beginning-position) (line-end-position) 1))
+
+;;;###autoload
+(defun enkan-repl-center-send-line-to-session-2 ()
+  "Send current line to session 2.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (enkan-repl--send-region-with-prefix
+   (line-beginning-position) (line-end-position) 2))
+
+;;;###autoload
+(defun enkan-repl-center-send-line-to-session-3 ()
+  "Send current line to session 3.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (enkan-repl--send-region-with-prefix
+   (line-beginning-position) (line-end-position) 3))
+
+;;;###autoload
+(defun enkan-repl-center-send-line-to-session-4 ()
+  "Send current line to session 4.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (enkan-repl--send-region-with-prefix
+   (line-beginning-position) (line-end-position) 4))
+
+;;;###autoload
+(defun enkan-repl-center-send-region-to-session-1 (start end)
+  "Send region to session 1.
+
+Category: Center File Multi-buffer Access"
+  (interactive "r")
+  (enkan-repl--send-region-with-prefix start end 1))
+
+;;;###autoload
+(defun enkan-repl-center-send-region-to-session-2 (start end)
+  "Send region to session 2.
+
+Category: Center File Multi-buffer Access"
+  (interactive "r")
+  (enkan-repl--send-region-with-prefix start end 2))
+
+;;;###autoload
+(defun enkan-repl-center-send-region-to-session-3 (start end)
+  "Send region to session 3.
+
+Category: Center File Multi-buffer Access"
+  (interactive "r")
+  (enkan-repl--send-region-with-prefix start end 3))
+
+;;;###autoload
+(defun enkan-repl-center-send-region-to-session-4 (start end)
+  "Send region to session 4.
+
+Category: Center File Multi-buffer Access"
+  (interactive "r")
+  (enkan-repl--send-region-with-prefix start end 4))
+
+;;;###autoload
+(defun enkan-repl-center-send-buffer-to-session-1 ()
+  "Send entire buffer to session 1.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (enkan-repl--send-region-with-prefix (point-min) (point-max) 1))
+
+;;;###autoload
+(defun enkan-repl-center-send-buffer-to-session-2 ()
+  "Send entire buffer to session 2.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (enkan-repl--send-region-with-prefix (point-min) (point-max) 2))
+
+;;;###autoload
+(defun enkan-repl-center-send-buffer-to-session-3 ()
+  "Send entire buffer to session 3.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (enkan-repl--send-region-with-prefix (point-min) (point-max) 3))
+
+;;;###autoload
+(defun enkan-repl-center-send-buffer-to-session-4 ()
+  "Send entire buffer to session 4.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (enkan-repl--send-region-with-prefix (point-min) (point-max) 4))
+
+;;;###autoload
+(defun enkan-repl-center-register-current-session (session-number)
+  "Register current directory's project as SESSION-NUMBER (1-4).
+
+Category: Center File Multi-buffer Access"
+  (interactive "nSession number (1-4): ")
+  (unless (<= 1 session-number 4)
+    (user-error "Session number must be 1-4"))
+  (let* ((project-name (enkan-repl--extract-project-name default-directory))
+         (internal-number (+ session-number 3)))
+    (enkan-repl--register-session internal-number project-name)
+    (message "Registered session %d: %s" session-number project-name)))
+
+;;;###autoload
+(defun enkan-repl-center-register-session-1 ()
+  "Register current project as session 1.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (enkan-repl-center-register-current-session 1))
+
+;;;###autoload
+(defun enkan-repl-center-register-session-2 ()
+  "Register current project as session 2.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (enkan-repl-center-register-current-session 2))
+
+;;;###autoload
+(defun enkan-repl-center-register-session-3 ()
+  "Register current project as session 3.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (enkan-repl-center-register-current-session 3))
+
+;;;###autoload
+(defun enkan-repl-center-register-session-4 ()
+  "Register current project as session 4.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (enkan-repl-center-register-current-session 4))
+
+;;;###autoload
+(defun enkan-repl-center-list-sessions ()
+  "Display currently registered sessions.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (if enkan-repl-session-list
+      (let ((msg "Registered sessions:\n"))
+        (dolist (session enkan-repl-session-list)
+          (let* ((internal-num (car session))
+                 (user-num (- internal-num 3))
+                 (project (cdr session)))
+            (when (<= 1 user-num 4)
+              (setq msg (concat msg (format "  %d: %s\n" user-num project))))))
+        (message "%s" msg))
+    (message "No sessions registered")))
+
+;;;###autoload
+(defun enkan-repl-center-clear-sessions ()
+  "Clear all registered sessions.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (when (yes-or-no-p "Clear all registered sessions? ")
+    (setq enkan-repl-session-list nil)
+    (message "All sessions cleared")))
+
+;;;###autoload
+(defun enkan-repl-center-show-session-aliases ()
+  "Show currently configured project aliases.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (if enkan-repl-project-aliases
+      (let ((msg "Project aliases:\n"))
+        (dolist (alias enkan-repl-project-aliases)
+          (setq msg (concat msg (format "  %s -> %s\n" (car alias) (cdr alias)))))
+        (message "%s" msg))
+    (message "No project aliases configured")))
+
+;;;###autoload
+(defun enkan-repl-center-send-to-all-sessions (text)
+  "Send TEXT to all registered sessions.
+
+Category: Center File Multi-buffer Access"
+  (interactive "sText to send to all sessions: ")
+  (if enkan-repl-session-list
+      (progn
+        (dolist (session enkan-repl-session-list)
+          (let* ((internal-num (car session))
+                 (project (cdr session))
+                 (user-num (- internal-num 3)))
+            (when (<= 1 user-num 4)
+              (let ((directory (enkan-repl--find-directory-by-project-name project)))
+                (when directory
+                  (enkan-repl--send-text text directory))))))
+        (message "Sent to all sessions: %s" text))
+    (message "No sessions registered")))
+
+;;;###autoload
+(defun enkan-repl-center-send-line-to-all-sessions ()
+  "Send current line to all registered sessions.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (let ((text (buffer-substring-no-properties
+               (line-beginning-position) (line-end-position))))
+    (enkan-repl-center-send-to-all-sessions text)))
+
+;;;###autoload
+(defun enkan-repl-center-send-region-to-all-sessions (start end)
+  "Send region to all registered sessions.
+
+Category: Center File Multi-buffer Access"
+  (interactive "r")
+  (let ((text (buffer-substring-no-properties start end)))
+    (enkan-repl-center-send-to-all-sessions text)))
+
+;;;###autoload
+(defun enkan-repl-center-file-help ()
+  "Show help for center file multi-buffer access.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (with-help-window "*Enkan Center File Help*"
+    (princ "Enkan-repl Center File Multi-buffer Access\n")
+    (princ "==========================================\n\n")
+    (princ "SENDING COMMANDS:\n")
+    (princ "  Prefix notation: :project-name command\n")
+    (princ "    Example: :pt-tools npm test\n")
+    (princ "    Example: :1 ls -la  (to session 1)\n\n")
+    (princ "  Universal arguments: C-u 1-4 <send-command>\n")
+    (princ "    C-u 1 enkan-repl-send-line  - Send line to session 1\n")
+    (princ "    C-u 2 enkan-repl-send-region  - Send region to session 2\n\n")
+    (princ "DIRECT COMMANDS:\n")
+    (princ "  enkan-repl-center-send-line-to-session-N\n")
+    (princ "  enkan-repl-center-send-region-to-session-N\n")
+    (princ "  enkan-repl-center-send-buffer-to-session-N\n\n")
+    (princ "SESSION MANAGEMENT:\n")
+    (princ "  enkan-repl-center-register-session-N - Register current project\n")
+    (princ "  enkan-repl-center-list-sessions - List registered sessions\n")
+    (princ "  enkan-repl-center-clear-sessions - Clear all sessions\n")
+    (princ "  enkan-repl-center-show-session-aliases - Show aliases\n\n")
+    (princ "BROADCAST:\n")
+    (princ "  enkan-repl-center-send-to-all-sessions - Send text to all\n")
+    (princ "  enkan-repl-center-send-line-to-all-sessions - Send line to all\n")
+    (princ "  enkan-repl-center-send-region-to-all-sessions - Send region to all\n\n")
+    (princ "LAYOUT MANAGEMENT:\n")
+    (princ "  enkan-repl-center-setup - Setup center file layout\n")
+    (princ "  enkan-repl-center-reset - Reset center file layout\n")
+    (princ "  enkan-repl-center-other-window - Switch between windows 1-3\n")))
+
+;;;; Center File Window Layout Management
+
+;;;###autoload
+(defun enkan-repl-center-setup ()
+  "Setup center file multi-buffer window layout.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (let ((session-count (length enkan-repl-session-list)))
+    (cond
+     ((<= session-count 2) (enkan-repl-setup-2session-layout))
+     ((= session-count 3)  (enkan-repl-setup-3session-layout))
+     ((>= session-count 4) (enkan-repl-setup-4session-layout))
+     (t (enkan-repl-setup-2session-layout))))
+  (message "Center file layout setup completed"))
+
+;;;###autoload
+(defun enkan-repl-center-reset ()
+  "Reset center file multi-buffer window layout.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (delete-other-windows)
+  (message "Center file layout reset"))
+
+
+;;;; Global Minor Mode for Center File Operations
+
+(defvar enkan-center-file-global-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "<escape>") 'enkan-repl-center-send-escape)
+    (define-key map (kbd "C-x g") 'enkan-repl-center-magit)
+    (define-key map (kbd "C-M-e") 'enkan-repl-center-send-enter)
+    (define-key map (kbd "C-M-i") 'enkan-repl-center-send-line)
+    (define-key map (kbd "C-M-1") 'enkan-repl-center-send-1)
+    (define-key map (kbd "C-M-2") 'enkan-repl-center-send-2)
+    (define-key map (kbd "C-M-3") 'enkan-repl-center-send-3)
+    (define-key map (kbd "C-M-4") 'enkan-repl-center-send-4)
+    (define-key map (kbd "C-M-5") 'enkan-repl-center-send-5)
+    (define-key map (kbd "C-M-t") 'enkan-repl-center-other-window)
+    (define-key map (kbd "C-M-b") 'enkan-repl-center-recenter-bottom)
+    (define-key map (kbd "C-M-s") 'enkan-repl-center-auto-setup)
+    (define-key map (kbd "C-M-f") 'enkan-repl-center-finish-all-sessions)
+    map)
+  "Global keymap for center file operations.")
+
+;; Store original keybindings for safe restoration
+(defvar enkan-center-file-original-keybindings nil
+  "Stores original keybindings before center file mode overrides them.")
+
+(define-minor-mode enkan-center-file-global-mode
+  "Global minor mode for center file operations.
+When enabled, center file keybindings are available across all buffers."
+  :init-value nil
+  :global t
+  :lighter " ECF"
+  :keymap enkan-center-file-global-mode-map
+  (if enkan-center-file-global-mode
+      (progn
+        ;; Save original keybindings before overriding
+        (unless enkan-center-file-original-keybindings
+          (setq enkan-center-file-original-keybindings '())
+          (map-keymap
+           (lambda (key command)
+             (when command
+               (let ((original-binding (lookup-key (current-global-map) (vector key))))
+                 (push (cons (vector key) original-binding) enkan-center-file-original-keybindings))))
+           enkan-center-file-global-mode-map))
+        ;; Copy all bindings from enkan-center-file-global-mode-map to global map
+        (map-keymap
+         (lambda (key command)
+           (when command
+             (define-key (current-global-map) (vector key) command)))
+         enkan-center-file-global-mode-map)
+        (message "✅ Center file global mode enabled - all keybindings overridden globally"))
+    (progn
+      ;; Restore original keybindings from saved state
+      (when enkan-center-file-original-keybindings
+        (dolist (binding enkan-center-file-original-keybindings)
+          (define-key (current-global-map) (car binding) (cdr binding)))
+        (setq enkan-center-file-original-keybindings nil))
+      (message "❌ Center file global mode disabled - original keybindings restored"))))
+
+;;;###autoload
+(defun enkan-toggle-center-file-global-mode ()
+  "Toggle center file global mode on/off."
+  (interactive)
+  (enkan-center-file-global-mode 'toggle))
+
+;;;; Auto Setup Functions
+
+(defun enkan-repl--get-project-info-from-registry (alias)
+  "Get project info from registry for ALIAS.
+Return (project-name . project-path) or nil if not found."
+  (cdr (assoc alias enkan-repl-center-project-registry)))
+
+(defun enkan-repl--get-session-project-name (session-number session-list)
+  "Pure function to get project name from session number."
+  (cdr (assoc session-number session-list)))
+
+(defun enkan-repl--get-project-path-from-registry (project-name project-registry)
+  "Pure function to get project path from registry by project name."
+  (let ((project-info (cl-find-if (lambda (entry)
+                                    (string= (car (cdr entry)) project-name))
+                                  project-registry)))
+    (when project-info
+      (cdr (cdr project-info)))))
+
+(defun enkan-repl--get-session-project-paths (session-numbers session-list project-registry)
+  "Pure function to get list of project paths for multiple session numbers.
+Returns: list of (session-number . project-path) for valid paths"
+  (cl-loop for session-number in session-numbers
+           for project-name = (enkan-repl--get-session-project-name session-number session-list)
+           for project-path = (when project-name
+                                (enkan-repl--get-project-path-from-registry project-name project-registry))
+           when project-path
+           collect (cons session-number project-path)))
+
+(defun enkan-repl--setup-project-session (alias session-number)
+  "Setup project session for given ALIAS and SESSION-NUMBER.
+Implemented as pure function, side effects are handled by upper functions."
+  (let ((project-info (enkan-repl--get-project-info-from-registry alias)))
+    (if project-info
+        (let ((project-name (car project-info))
+              (project-path (cdr project-info)))
+          (cons project-name project-path))
+      (error "Project alias '%s' not found in registry" alias))))
+
+;;;###autoload
+(defun enkan-repl-center-auto-setup (layout-name)
+  "Auto start eat sessions using multi-project layout configuration.
+LAYOUT-NAME is the configuration name defined in enkan-repl-center-multi-project-layouts.
+This function only starts eat sessions - use enkan-repl-setup (C-M-l) to arrange windows."
+  (interactive
+   (list (completing-read "Layout: "
+                          (mapcar #'car enkan-repl-center-multi-project-layouts))))
+  ;; Enable global center file mode automatically
+  (unless enkan-center-file-global-mode
+    (enkan-center-file-global-mode 1)
+    (message "🚀 Auto-enabled center file global mode for multi-project workflow"))
+  ;; Display current state before changes
+  (let ((old-layout enkan-repl--current-multi-project-layout)
+        (old-session-list (copy-tree enkan-repl-session-list))
+        (old-counter enkan-repl--session-counter))
+    (message "🔧 C-M-s: Current state - layout:%s, sessions:%s, counter:%d"
+             (or old-layout "nil") (or old-session-list "nil") old-counter))
+  ;; Set the new layout configuration (this overwrites any existing configuration)
+  (setq enkan-repl--current-multi-project-layout layout-name)
+  (let ((alias-list (cdr (assoc layout-name enkan-repl-center-multi-project-layouts))))
+    (unless alias-list
+      (error "Layout '%s' not found" layout-name))
+    (let ((session-count (length alias-list)))
+      (when (> session-count 4)
+        (error "Too many projects: %d (max 4)" session-count))
+      ;; Clear session list and reset any previous layout configuration
+      (setq enkan-repl-session-list nil)
+      (setq enkan-repl--session-counter 0)
+      (setq enkan-repl--current-multi-project-layout nil)
+      (message "🧹 C-M-s: Reset - enkan-repl-session-list=%s, enkan-repl--session-counter=%d, enkan-repl--current-multi-project-layout=%s"
+               "nil" 0 "nil")
+      ;; Start sessions for each project
+      (let ((session-number 4)) ; Internal numbers start from 4
+        (dolist (alias alias-list)
+          (let ((project-info (enkan-repl--setup-project-session alias session-number)))
+            (let ((project-name (car project-info))
+                  (project-path (expand-file-name (cdr project-info)))
+                  (default-directory (expand-file-name (cdr project-info))))
+              ;; Register session
+              (enkan-repl--register-session session-number project-name)
+              ;; Start eat session in current directory
+              (enkan-repl-start-eat)
+              (setq session-number (1+ session-number)))))
+      ;; Set final layout configuration
+      (setq enkan-repl--current-multi-project-layout layout-name)
+      ;; Display final state
+      (message "✅ C-M-s: Final state - enkan-repl--current-multi-project-layout='%s', enkan-repl-session-list=%s, enkan-repl--session-counter=%d"
+               layout-name enkan-repl-session-list enkan-repl--session-counter)
+      (message "Eat sessions started for layout: %s (%d sessions). Use \\C-\\M-l to arrange windows."
+               layout-name session-count)))))
+
+;;;###autoload
+(defun enkan-repl-center-finish-all-sessions ()
+  "Terminate all registered center file sessions.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (if (null enkan-repl-session-list)
+      (message "No registered sessions to terminate")
+    ;; Display current state before termination
+    (message "🔧 C-M-f: Current state - layout:%s, sessions:%s, counter:%d"
+             (or enkan-repl--current-multi-project-layout "nil")
+             enkan-repl-session-list
+             enkan-repl--session-counter)
+    (let ((terminated-count 0))
+      (when (y-or-n-p (format "Terminate all %d registered sessions? "
+                              (length enkan-repl-session-list)))
+        (dolist (session enkan-repl-session-list)
+          (let* ((session-number (car session))
+                 (project-name (cdr session))
+                 ;; Get project directory from registry using correct function
+                 (project-path (enkan-repl--get-project-path-from-registry project-name enkan-repl-center-project-registry)))
+            (when project-path
+              ;; Use the same buffer discovery method as enkan-repl-finish-eat
+              (let ((buffer (enkan-repl--get-buffer-for-directory project-path)))
+                (when buffer
+                  (kill-buffer buffer)
+                  (setq terminated-count (1+ terminated-count)))))))
+        ;; Clear session list and reset layout configuration
+        (setq enkan-repl-session-list nil)
+        (setq enkan-repl--session-counter 0)
+        (setq enkan-repl--current-multi-project-layout nil)
+        ;; Display what variables were reset
+        (message "🧹 C-M-f: Reset - enkan-repl-session-list=%s, enkan-repl--session-counter=%d, enkan-repl--current-multi-project-layout=%s"
+                 "nil" 0 "nil")
+        (message "✅ C-M-f: Terminated %d sessions, cleared session list and reset layout configuration" terminated-count)))))
+
+;;;###autoload
+(defun enkan-repl-center-recenter-bottom ()
+  "Recenter all enkan terminal buffers at bottom from center file.
+
+Category: Center File Multi-buffer Access"
+  (interactive)
+  (let ((original-window (selected-window))
+        (enkan-buffers (seq-filter (lambda (buf)
+                                     (string-match-p "^\\*enkan:" (buffer-name buf)))
+                                   (buffer-list)))
+        (recentered-count 0))
+    (dolist (buffer enkan-buffers)
+      (let ((window (get-buffer-window buffer)))
+        (when window
+          (with-selected-window window
+            (goto-char (point-max))
+            (recenter -1)
+            (setq recentered-count (1+ recentered-count))))))
+    ;; Return to original window
+    (select-window original-window)
+    (if (> recentered-count 0)
+        (message "Recentered %d enkan session(s) at bottom" recentered-count)
+      (message "No enkan sessions found to recenter"))))
+
+(defun enkan-repl--collect-enkan-buffers-pure (buffer-list)
+  "Pure function to collect enkan buffers from BUFFER-LIST.
+Returns list of buffers whose names match enkan pattern."
+  (seq-filter (lambda (buf)
+                (and (bufferp buf)
+                     (buffer-name buf)
+                     (string-match-p "^\\*enkan:" (buffer-name buf))))
+              buffer-list))
+
+(defun enkan-repl--get-buffer-process-info-pure (buffer)
+  "Pure function to get process info for BUFFER.
+Returns plist with :buffer, :name, :live-p, :has-process, :process."
+  (when (bufferp buffer)
+    (let* ((name (buffer-name buffer))
+           (live-p (buffer-live-p buffer))
+           (process-info (when live-p
+                          (with-current-buffer buffer
+                            (list :bound (boundp 'eat--process)
+                                  :process (if (boundp 'eat--process) eat--process nil))))))
+      (list :buffer buffer
+            :name name
+            :live-p live-p
+            :has-process (and process-info (plist-get process-info :bound) (plist-get process-info :process))
+            :process (when process-info (plist-get process-info :process))))))
+
+(defun enkan-repl--filter-valid-buffers-pure (enkan-buffers)
+  "Pure function to filter buffers that have active eat processes.
+ENKAN-BUFFERS is a list of buffer objects.
+Returns list of buffers that have live eat processes."
+  (seq-filter (lambda (buffer)
+                (with-current-buffer buffer
+                  (and (boundp 'eat--process)
+                       eat--process
+                       (process-live-p eat--process))))
+              enkan-buffers))
+
+(defun enkan-repl--build-buffer-selection-choices-pure (buffers)
+  "Pure function to build selection choices from BUFFERS.
+Returns list of cons cells (display-name . buffer) for selection UI."
+  (mapcar (lambda (buffer)
+            (let ((info (enkan-repl--get-buffer-process-info-pure buffer)))
+              (cons (format "%s%s"
+                           (plist-get info :name)
+                           (if (plist-get info :has-process) " [ACTIVE]" " [INACTIVE]"))
+                    buffer)))
+          buffers))
+
+
+(defun enkan-repl--get-buffer-by-index-pure (buffers index)
+  "Pure function to get buffer from BUFFERS by INDEX (1-based).
+Returns buffer if valid index, nil otherwise."
+  (when (and (integerp index)
+             (> index 0)
+             (<= index (length buffers)))
+    (nth (1- index) buffers)))
+
+(defun enkan-repl--parse-prefix-arg-pure (prefix-arg)
+  "Pure function to parse PREFIX-ARG into action type.
+Returns plist with :action and :index."
+  (cond
+   ((null prefix-arg)
+    (list :action 'select :index nil))
+   ((integerp prefix-arg)
+    (list :action 'index :index prefix-arg))
+   (t
+    (list :action 'invalid :index nil))))
+
+(defun enkan-repl--should-show-buffer-selection-pure (action-type valid-buffers)
+  "Pure function to determine if buffer selection should be shown.
+Returns t if selection UI needed, nil for direct index access."
+  (and (eq action-type 'select)
+       (> (length valid-buffers) 0)))
+
+(defun enkan-repl--send-number-to-buffer-pure (number buffer)
+  "Pure function to determine parameters for sending NUMBER to BUFFER.
+Returns plist with :can-send, :number, :buffer, :message."
+  (let ((info (enkan-repl--get-buffer-process-info-pure buffer)))
+    (list :can-send (plist-get info :has-process)
+          :number number
+          :buffer buffer
+          :message (if (plist-get info :has-process)
+                      (format "Will send '%s' to %s" number (plist-get info :name))
+                    (format "Cannot send to inactive buffer: %s" (plist-get info :name))))))
+
+(defun enkan-repl--validate-number-input-pure (number)
+  "Pure function to validate NUMBER input for sending.
+Returns plist with :valid, :number, :message."
+  (cond
+   ((null number)
+    (list :valid nil :number nil :message "Number is required"))
+   ((not (stringp number))
+    (list :valid nil :number nil :message "Number must be a string"))
+   ((string-empty-p number)
+    (list :valid nil :number nil :message "Number cannot be empty"))
+   ((not (string-match-p "^[0-9]$" number))
+    (list :valid nil :number nil :message "Number must be a single digit (0-9)"))
+   (t
+    (list :valid t :number number :message (format "Valid number: %s" number)))))
+
+(defun enkan-repl--center-send-text-to-buffer (text buffer)
+  "Center file specific function to send TEXT to BUFFER.
+Sends text followed by carriage return, with cursor positioning."
+  (when (and (bufferp buffer)
+             (buffer-live-p buffer)
+             (with-current-buffer buffer
+               (and (boundp 'eat--process)
+                    eat--process
+                    (process-live-p eat--process))))
+    (with-current-buffer buffer
+      (eat--send-string eat--process text)
+      (eat--send-string eat--process "\r")
+      ;; Move cursor to bottom after eat processes the output
+      (run-at-time 0.01 nil
+                   (lambda (buf)
+                     (when (buffer-live-p buf)
+                       (with-current-buffer buf
+                         (goto-char (point-max)))))
+                   buffer)
+      t)))
+
+;;;###autoload
+(defun enkan-repl-center-send-escape (&optional prefix-arg)
+  "Send ESC key to eat session buffer from center file.
+Always requires buffer specification:
+- Without prefix: Select from available enkan buffers
+- With numeric prefix: Send to buffer at that index (1-based)
+
+Category: Center File Multi-buffer Access"
+  (interactive "P")
+  (message "Starting enkan-repl-center-send-escape with prefix-arg: %s" prefix-arg)
+  (let* ((enkan-buffers (enkan-repl--collect-enkan-buffers-pure (buffer-list)))
+         (valid-buffers (enkan-repl--filter-valid-buffers-pure enkan-buffers))
+         (parsed-arg (enkan-repl--parse-prefix-arg-pure prefix-arg)))
+    (message "Found %d enkan buffers, %d valid"
+             (length enkan-buffers) (length valid-buffers))
+    (cond
+     ((= (length valid-buffers) 0)
+      (message "No active enkan sessions found"))
+     ((eq 'invalid (plist-get parsed-arg :action))
+      (message "Invalid prefix argument"))
+     ((eq 'index (plist-get parsed-arg :action))
+      (let* ((index (plist-get parsed-arg :index))
+             (target-buffer (enkan-repl--get-buffer-by-index-pure valid-buffers index)))
+        (message "Attempting to send ESC to buffer index %d" index)
+        (if target-buffer
+            (let ((info (enkan-repl--get-buffer-process-info-pure target-buffer)))
+              (with-current-buffer target-buffer
+                (eat--send-string (plist-get info :process) "\e"))
+              (message "Sent ESC to buffer %d: %s" index (plist-get info :name)))
+          (message "Invalid buffer index %d (valid range: 1-%d)" index (length valid-buffers)))))
+     ((enkan-repl--should-show-buffer-selection-pure (plist-get parsed-arg :action) valid-buffers)
+      (let* ((choices (enkan-repl--build-buffer-selection-choices-pure valid-buffers))
+             (selected-display (completing-read "Select buffer to send ESC: " choices nil t))
+             (selected-buffer (cdr (assoc selected-display choices))))
+        (message "User selected buffer: %s" (buffer-name selected-buffer))
+        (let ((info (enkan-repl--get-buffer-process-info-pure selected-buffer)))
+          (with-current-buffer selected-buffer
+            (eat--send-string (plist-get info :process) "\e"))
+          (message "Sent ESC to selected buffer: %s" (plist-get info :name)))))
+     (t
+      (message "No valid action determined")))))
+
+;;;###autoload
+(defun enkan-repl-center-send-enter (&optional prefix-arg)
+  "Send enter key to eat session buffer from center file.
+Always requires buffer specification:
+- Without prefix: Select from available enkan buffers
+- With numeric prefix: Send to buffer at that index (1-based)
+
+Category: Center File Multi-buffer Access"
+  (interactive "P")
+  (enkan-repl--center-send-text-with-selection "" prefix-arg))
+
+;;;###autoload
+(defun enkan-repl-center-send-1 (&optional prefix-arg)
+  "Send '1' to eat session buffer from center file.
+Always requires buffer specification:
+- Without prefix: Select from available enkan buffers
+- With numeric prefix: Send to buffer at that index (1-based)
+
+Category: Center File Multi-buffer Access"
+  (interactive "P")
+  (enkan-repl--center-send-number-with-selection "1" prefix-arg))
+
+;;;###autoload
+(defun enkan-repl-center-send-2 (&optional prefix-arg)
+  "Send '2' to eat session buffer from center file.
+Always requires buffer specification:
+- Without prefix: Select from available enkan buffers
+- With numeric prefix: Send to buffer at that index (1-based)
+
+Category: Center File Multi-buffer Access"
+  (interactive "P")
+  (enkan-repl--center-send-number-with-selection "2" prefix-arg))
+
+;;;###autoload
+(defun enkan-repl-center-send-3 (&optional prefix-arg)
+  "Send '3' to eat session buffer from center file.
+Always requires buffer specification:
+- Without prefix: Select from available enkan buffers
+- With numeric prefix: Send to buffer at that index (1-based)
+
+Category: Center File Multi-buffer Access"
+  (interactive "P")
+  (enkan-repl--center-send-number-with-selection "3" prefix-arg))
+
+;;;###autoload
+(defun enkan-repl-center-send-4 (&optional prefix-arg)
+  "Send '4' to eat session buffer from center file.
+Always requires buffer specification:
+- Without prefix: Select from available enkan buffers
+- With numeric prefix: Send to buffer at that index (1-based)
+
+Category: Center File Multi-buffer Access"
+  (interactive "P")
+  (enkan-repl--center-send-number-with-selection "4" prefix-arg))
+
+;;;###autoload
+(defun enkan-repl-center-send-5 (&optional prefix-arg)
+  "Send '5' to eat session buffer from center file.
+Always requires buffer specification:
+- Without prefix: Select from available enkan buffers
+- With numeric prefix: Send to buffer at that index (1-based)
+
+Category: Center File Multi-buffer Access"
+  (interactive "P")
+  (enkan-repl--center-send-number-with-selection "5" prefix-arg))
+
+(defun enkan-repl--center-send-text-with-selection (text prefix-arg)
+  "Internal function to send TEXT with buffer selection logic using PREFIX-ARG."
+  (message "Starting enkan-repl-center-send-text with prefix-arg: %s" prefix-arg)
+  (let* ((enkan-buffers (enkan-repl--collect-enkan-buffers-pure (buffer-list)))
+         (valid-buffers (enkan-repl--filter-valid-buffers-pure enkan-buffers))
+         (parsed-arg (enkan-repl--parse-prefix-arg-pure prefix-arg)))
+    (message "Found %d enkan buffers, %d valid for text sending"
+             (length enkan-buffers) (length valid-buffers))
+    (cond
+     ((= (length valid-buffers) 0)
+      (message "No active enkan sessions found"))
+     ((eq 'invalid (plist-get parsed-arg :action))
+      (message "Invalid prefix argument"))
+     ((eq 'index (plist-get parsed-arg :action))
+      (let* ((index (plist-get parsed-arg :index))
+             (target-buffer (enkan-repl--get-buffer-by-index-pure valid-buffers index)))
+        (message "Attempting to send text '%s' to buffer index %d" text index)
+        (if target-buffer
+            (let ((info (enkan-repl--get-buffer-process-info-pure target-buffer)))
+              (if (plist-get info :has-process)
+                  (progn
+                    (enkan-repl--center-send-text-to-buffer text target-buffer)
+                    (message "Sent '%s' to buffer %d: %s" text index (plist-get info :name)))
+                (message "Cannot send to inactive buffer %d: %s" index (plist-get info :name))))
+          (message "Invalid buffer index %d (valid range: 1-%d)" index (length valid-buffers)))))
+     ((enkan-repl--should-show-buffer-selection-pure (plist-get parsed-arg :action) valid-buffers)
+      (let* ((choices (enkan-repl--build-buffer-selection-choices-pure valid-buffers))
+             (selected-display (completing-read (format "Select buffer to send '%s': "
+                                                        (if (string-empty-p text) "ENTER" text))
+                                               choices nil t))
+             (selected-buffer (cdr (assoc selected-display choices))))
+        (message "User selected buffer for text '%s': %s" text (buffer-name selected-buffer))
+        (let ((info (enkan-repl--get-buffer-process-info-pure selected-buffer)))
+          (if (plist-get info :has-process)
+              (progn
+                (enkan-repl--center-send-text-to-buffer text selected-buffer)
+                (message "Sent '%s' to selected buffer: %s" text (plist-get info :name)))
+            (message "Cannot send to selected buffer: %s" (plist-get info :name))))))
+     (t
+      (message "No valid action determined for text sending")))))
+
+(defun enkan-repl--center-send-number-with-selection (number prefix-arg)
+  "Internal function to send NUMBER with buffer selection logic using PREFIX-ARG."
+  (message "Starting enkan-repl-center-send-%s with prefix-arg: %s" number prefix-arg)
+  (let ((validation (enkan-repl--validate-number-input-pure number)))
+    (if (not (plist-get validation :valid))
+        (message "Invalid number input: %s" (plist-get validation :message))
+      (let* ((enkan-buffers (enkan-repl--collect-enkan-buffers-pure (buffer-list)))
+             (valid-buffers (enkan-repl--filter-valid-buffers-pure enkan-buffers))
+             (parsed-arg (enkan-repl--parse-prefix-arg-pure prefix-arg)))
+        (message "Found %d enkan buffers, %d valid for number sending"
+                 (length enkan-buffers) (length valid-buffers))
+        (cond
+         ((= (length valid-buffers) 0)
+          (message "No active enkan sessions found"))
+         ((eq 'invalid (plist-get parsed-arg :action))
+          (message "Invalid prefix argument"))
+         ((eq 'index (plist-get parsed-arg :action))
+          (let* ((index (plist-get parsed-arg :index))
+                 (target-buffer (enkan-repl--get-buffer-by-index-pure valid-buffers index)))
+            (message "Attempting to send number %s to buffer index %d" number index)
+            (if target-buffer
+                (let* ((send-result (enkan-repl--send-number-to-buffer-pure number target-buffer))
+                       (info (enkan-repl--get-buffer-process-info-pure target-buffer)))
+                  (if (plist-get send-result :can-send)
+                      (progn
+                        (enkan-repl--center-send-text-to-buffer number target-buffer)
+                        (message "Sent '%s' to buffer %d: %s" number index (plist-get info :name)))
+                    (message "Cannot send to buffer %d: %s" index (plist-get send-result :message))))
+              (message "Invalid buffer index %d (valid range: 1-%d)" index (length valid-buffers)))))
+         ((enkan-repl--should-show-buffer-selection-pure (plist-get parsed-arg :action) valid-buffers)
+          (let* ((choices (enkan-repl--build-buffer-selection-choices-pure valid-buffers))
+                 (selected-display (completing-read (format "Select buffer to send '%s': " number) choices nil t))
+                 (selected-buffer (cdr (assoc selected-display choices))))
+            (message "User selected buffer for number %s: %s" number (buffer-name selected-buffer))
+            (let* ((send-result (enkan-repl--send-number-to-buffer-pure number selected-buffer))
+                   (info (enkan-repl--get-buffer-process-info-pure selected-buffer)))
+              (if (plist-get send-result :can-send)
+                  (progn
+                    (enkan-repl--center-send-text-to-buffer number selected-buffer)
+                    (message "Sent '%s' to selected buffer: %s" number (plist-get info :name)))
+                (message "Cannot send to selected buffer: %s" (plist-get send-result :message))))))
+         (t
+          (message "No valid action determined for number sending")))))))
+
+(defun enkan-repl--analyze-center-send-content-pure (content prefix-arg)
+  "Pure function to analyze center-send content and determine action.
+CONTENT is the text content to analyze.
+PREFIX-ARG is the numeric prefix argument.
+Returns plist with :action and :data."
+  (let ((trimmed-content (string-trim content)))
+    (cond
+     ;; Numeric prefix argument takes priority
+     ((and (numberp prefix-arg) (<= 1 prefix-arg 4))
+      (list :action 'prefix-number :data prefix-arg))
+     ;; Check if content contains only :esc
+     ((string= trimmed-content ":esc")
+      (list :action 'escape-directly))
+     ;; Check if content starts with :alias (colon + word + space)
+     ((string-match "^:\\([a-zA-Z0-9_.-]+\\) \\(.*\\)$" trimmed-content)
+      ;; This is :alias something format - always use alias-command
+      (list :action 'alias-command :data trimmed-content))
+     ;; Default behavior
+     (t
+      (list :action 'default-send :data content)))))
+
+;; Alias command parsing functions
+
+(defun enkan-repl-center--parse-alias-command-pure (input-string)
+  "Pure function to parse alias command format: ':alias esc' or ':alias :ret'.
+INPUT-STRING is the command string to parse.
+Returns plist with :valid, :alias, :command, :text, :message."
+  (cond
+   ((not (stringp input-string))
+    (list :valid nil :message "Input must be a string"))
+   ((string-empty-p input-string)
+    (list :valid nil :message "Must start with : prefix"))
+   ((not (string-match-p "^:" input-string))
+    (list :valid nil :message "Must start with : prefix"))
+   ((string-match "^:\\([^ ]+\\)\\(?: \\(.*\\)\\)?$" input-string)
+    (let* ((alias (match-string 1 input-string))
+           (rest (match-string 2 input-string)))
+      (if (string-empty-p alias)
+          (list :valid nil :message "Invalid format. Alias cannot be empty")
+        (cond
+         ((null rest)
+          ;; Only alias specified
+          (list :valid t :alias alias :command :empty :text ""))
+         ((equal rest "esc")
+          ;; Escape command
+          (list :valid t :alias alias :command :esc :text nil))
+         ((equal rest ":ret")
+          ;; Return command
+          (list :valid t :alias alias :command :ret :text nil))
+         (t
+          ;; Text to send
+          (list :valid t :alias alias :command :text :text rest))))))
+   (t
+    (list :valid nil :message "Invalid format. Use: :alias [text|esc|:ret]"))))
+
+(defun enkan-repl-center--resolve-alias-to-buffer-pure (alias enkan-buffers)
+  "Pure function to resolve alias to buffer from ENKAN-BUFFERS.
+ALIAS is the alias string to match against buffer names.
+ENKAN-BUFFERS is list of available enkan buffers.
+Returns buffer object or nil if not found."
+  ;; First check if alias exists in project aliases
+  (let ((alias-entry (assoc alias enkan-repl-project-aliases)))
+    (if alias-entry
+        ;; Alias found, resolve to project name and search buffers
+        (let* ((resolved-project (cdr alias-entry))
+               (matching-buffers (seq-filter
+                                 (lambda (buf)
+                                   (string-match-p (regexp-quote resolved-project) (buffer-name buf)))
+                                 enkan-buffers)))
+          (if matching-buffers
+              ;; Return first match
+              ;; Could be enhanced to show selection UI
+              (car matching-buffers)
+            nil))
+      ;; Alias not found in project aliases
+      nil)))
+
+(defun enkan-repl--send-escape-directly ()
+  "Send escape key to the buffer corresponding to a project alias, like \":pr\".
+Looks for a project alias in enkan-repl-project-aliases and sends ESC to corresponding buffer."
+  (let* ((pr-project (cdr (assoc "pr" enkan-repl-project-aliases)))
+         (target-buffer (when pr-project
+                          (enkan-repl--get-buffer-for-directory
+                           (enkan-repl--get-project-directory-from-registry pr-project)))))
+    (if target-buffer
+        (let ((info (enkan-repl--get-buffer-process-info-pure target-buffer)))
+          (when (plist-get info :has-process)
+            (with-current-buffer target-buffer
+              (eat--send-string (plist-get info :process) "\e"))
+            (message "Sent ESC to a project buffer: %s" (plist-get info :name))))
+      (message "No project alias configured or buffer not found"))))
+
+(defun enkan-repl-center-send-line (&optional arg)
+  "Send current line to center file session.
+With prefix argument ARG (1-4), send to specific session number.
+Line starting with ':alias esc' sends ESC key to buffer containing alias.
+Line containing only ':esc' sends ESC key to a project buffer.
+Without prefix argument, send line to selected buffer.
+
+Category: Center File Multi-buffer Access"
+  (interactive "P")
+  (let* ((line-text (buffer-substring-no-properties
+                     (line-beginning-position) (line-end-position)))
+         (analysis (enkan-repl--analyze-center-send-content-pure line-text arg)))
+    (message "center-send-line analysis - content: '%s', action: %s, data: %s"
+             line-text (plist-get analysis :action) (plist-get analysis :data))
+    (pcase (plist-get analysis :action)
+      ('prefix-number
+       (message "Executing prefix-number action with data: %s" (plist-get analysis :data))
+       (enkan-repl--send-region-with-prefix
+        (line-beginning-position) (line-end-position) (plist-get analysis :data)))
+      ('escape-directly
+       (message "Executing escape-directly action")
+       (enkan-repl--send-escape-directly))
+      ('alias-command
+       (message "Executing alias-command action with data: '%s'" (plist-get analysis :data))
+       (enkan-repl-center-send-region
+        (line-beginning-position) (line-end-position) (plist-get analysis :data)))
+      ('default-send
+       (message "Executing default-send action")
+       (enkan-repl--send-buffer-content
+        (line-beginning-position) (line-end-position) "Line")))))
+
+;; Pure functions for center file operations (used by enkan-repl-center-open-file)
+(defun enkan-center-file-validate-path-pure (file-path)
+  "Validate center FILE-PATH for opening.
+Returns plist with :valid, :message."
+  (cond
+   ((null file-path)
+    (list :valid nil :message "Center file path not configured"))
+   ((not (stringp file-path))
+    (list :valid nil :message "Center file path must be a string"))
+   ((string-empty-p file-path)
+    (list :valid nil :message "Center file path is empty"))
+   (t
+    (list :valid t :message "Valid center file path"))))
+
+(defun enkan-center-file-check-exists-pure (file-path)
+  "Check if center FILE-PATH exists.
+Returns plist with :exists, :action."
+  (if (file-exists-p file-path)
+      (list :exists t :action "open")
+    (list :exists nil :action "create")))
+
+(defun enkan-center-file-determine-action-pure (file-path)
+  "Determine action to take for center FILE-PATH.
+Returns plist with :valid, :action, :message."
+  (let ((validation (enkan-center-file-validate-path-pure file-path)))
+    (if (plist-get validation :valid)
+        (let ((exists-check (enkan-center-file-check-exists-pure file-path)))
+          (list :valid t
+                :action (plist-get exists-check :action)
+                :message (if (plist-get exists-check :exists)
+                            "Opening existing center file"
+                          "Creating new center file")))
+      validation)))
+
+(defun enkan-repl-center-open-file ()
+  "Open or create the center file based on enkan-repl-center-file configuration.
+
+Category: Center File Operations"
+  (interactive)
+  (let ((result (enkan-center-file-determine-action-pure enkan-repl-center-file)))
+    (if (plist-get result :valid)
+        (progn
+          (message "%s" (plist-get result :message))
+          (find-file enkan-repl-center-file))
+      (error "%s" (plist-get result :message)))))
+
+;; Pure functions for magit project selection (used by enkan-repl-center-magit)
+(defun enkan-repl--get-magit-project-list-pure (project-registry)
+  "Get list of projects for magit selection from PROJECT-REGISTRY.
+Returns list of (project-name . project-path) pairs."
+  (unless project-registry
+    (error "Project registry is empty"))
+  (mapcar (lambda (entry)
+            (let ((project-name (car entry))
+                  (project-path (if (stringp (cdr entry))
+                                    (cdr entry)
+                                  ;; Handle nested cons structure
+                                  (if (consp (cdr entry))
+                                      (cdr (cdr entry))
+                                    (cdr entry)))))
+              (cons project-name (expand-file-name project-path))))
+          project-registry))
+
+(defun enkan-repl--validate-magit-project-path-pure (project-path)
+  "Validate PROJECT-PATH for magit operation.
+Returns plist with :valid, :message."
+  (cond
+   ((null project-path)
+    (list :valid nil :message "Project path is null"))
+   ((not (stringp project-path))
+    (list :valid nil :message "Project path must be a string"))
+   ((not (file-directory-p project-path))
+    (list :valid nil :message "Project path does not exist or is not a directory"))
+   (t
+    (list :valid t :message "Valid project path"))))
+
+(defun enkan-repl--create-magit-completion-list-pure (project-list)
+  "Create completion list for magit project selection from PROJECT-LIST.
+Returns list of strings for completing-read."
+  (unless project-list
+    (error "Project list is empty"))
+  (mapcar (lambda (entry)
+            (format "%s (%s)" (car entry) (cdr entry)))
+          project-list))
+
+(defun enkan-repl--parse-selected-magit-project-pure (selected-string project-list)
+  "Parse SELECTED-STRING to get project info from PROJECT-LIST.
+Returns plist with :project-name, :project-path."
+  (let ((matched-entry (cl-find-if
+                        (lambda (entry)
+                          (string= selected-string
+                                   (format "%s (%s)" (car entry) (cdr entry))))
+                        project-list)))
+    (if matched-entry
+        (list :project-name (car matched-entry)
+              :project-path (cdr matched-entry))
+      (list :project-name nil :project-path nil))))
+
+(defun enkan-repl-center-magit ()
+  "Open magit for selected project from registry with UI selection.
+
+Category: Center File Operations"
+  (interactive)
+  (if (not (boundp 'enkan-repl-center-project-registry))
+      (error "enkan-repl-center-project-registry is not defined")
+    (if (null enkan-repl-center-project-registry)
+        (error "Project registry is empty. Configure enkan-repl-center-project-registry")
+      (let* ((project-list (enkan-repl--get-magit-project-list-pure enkan-repl-center-project-registry))
+             (completion-list (enkan-repl--create-magit-completion-list-pure project-list))
+             (selected (completing-read "Select project for magit: " completion-list nil t))
+             (project-info (enkan-repl--parse-selected-magit-project-pure selected project-list)))
+        (let ((project-path (plist-get project-info :project-path))
+              (project-name (plist-get project-info :project-name)))
+          (if project-path
+              (let ((validation (enkan-repl--validate-magit-project-path-pure project-path)))
+                (if (plist-get validation :valid)
+                    (progn
+                      (let ((default-directory project-path))
+                        (magit-status))
+                      (message "Opened magit for project: %s (%s)" project-name project-path))
+                  (error "Invalid project path: %s" (plist-get validation :message))))
+            (error "Failed to parse selected project")))))))
+
+(defun enkan-repl-center-send-region (start end &optional action-string)
+  "Send region to center file buffer with action specification.
+ACTION-STRING format:
+- \":er alias\" - Send region to buffer containing alias
+- \":er alias esc\" - Send esc to buffer containing alias
+- \":er alias :ret\" - Send return to buffer containing alias
+- Empty or no prefix - Use interactive buffer selection
+
+Category: Center File Multi-buffer Access"
+  (interactive "r\nsAction (or empty for selection): ")
+  (let* ((region-text (buffer-substring-no-properties start end))
+         (enkan-buffers (enkan-repl--collect-enkan-buffers-pure (buffer-list)))
+         (valid-buffers (seq-filter (lambda (buffer)
+                                     (with-current-buffer buffer
+                                       (and (boundp 'eat--process)
+                                            eat--process
+                                            (process-live-p eat--process))))
+                                   enkan-buffers)))
+
+    (if (string-empty-p action-string)
+        ;; No action specified - use selection UI
+        (if (> (length valid-buffers) 0)
+            (let* ((choices (enkan-repl--build-buffer-selection-choices-pure valid-buffers))
+                   (selected-display (completing-read "Select buffer for region send: " choices nil t))
+                   (target-buffer (cdr (assoc selected-display choices))))
+              (if (enkan-repl--center-send-text-to-buffer region-text target-buffer)
+                  (message "Region sent to buffer: %s" (buffer-name target-buffer))
+                (message "Failed to send region to buffer: %s" (buffer-name target-buffer))))
+          (message "No active enkan sessions found"))
+      ;; Parse action string
+      (let ((parsed (enkan-repl-center--parse-alias-command-pure action-string)))
+        (if (plist-get parsed :valid)
+            (let* ((alias (plist-get parsed :alias))
+                   (command (plist-get parsed :command))
+                   (resolved-buffer (enkan-repl-center--resolve-alias-to-buffer-pure
+                                    alias valid-buffers)))
+              (if resolved-buffer
+                  (cond
+                   ((eq command :esc)
+                    ;; Send ESC using exact same logic as enkan-repl--send-escape-directly
+                    (if (and resolved-buffer
+                             (with-current-buffer resolved-buffer
+                               (and (boundp 'eat--process)
+                                    eat--process
+                                    (process-live-p eat--process))))
+                        (progn
+                          (enkan-repl--debug-message "Sending ESC key to session buffer")
+                          (with-current-buffer resolved-buffer
+                            (eat--send-string eat--process "\e")
+                            ;; Move cursor to bottom after eat processes the output
+                            (run-at-time 0.01 nil
+                                         (lambda (buf)
+                                           (with-current-buffer buf
+                                             (goto-char (point-max))))
+                                         resolved-buffer)
+                            (enkan-repl--debug-message "ESC key sent successfully"))
+                          (message "Sent ESC to session"))
+                      (message "❌ Cannot send - buffer has no active eat process")))
+                   ((eq command :ret)
+                    (if (enkan-repl--center-send-text-to-buffer "\r" resolved-buffer)
+                        (message "Return sent to buffer: %s" (buffer-name resolved-buffer))
+                      (message "Failed to send return to buffer: %s" (buffer-name resolved-buffer))))
+                   ((eq command :empty)
+                    (if (enkan-repl--center-send-text-to-buffer region-text resolved-buffer)
+                        (message "Region sent to buffer: %s" (buffer-name resolved-buffer))
+                      (message "Failed to send region to buffer: %s" (buffer-name resolved-buffer))))
+                   ((eq command :text)
+                    (let ((combined-text (concat region-text " " (plist-get parsed :text))))
+                      (if (enkan-repl--center-send-text-to-buffer combined-text resolved-buffer)
+                          (message "Combined text sent to buffer: %s" (buffer-name resolved-buffer))
+                        (message "Failed to send combined text to buffer: %s" (buffer-name resolved-buffer)))))
+                   (t
+                    (message "Unknown command: %s" command)))
+                (message "No buffer found matching alias: %s" alias)))
+          (message "Invalid action format: %s" (plist-get parsed :message)))))))
+
+(defun enkan-repl-center-send-buffer (&optional action-string)
+  "Send entire buffer to center file buffer with action specification.
+ACTION-STRING format:
+- \":er alias\" - Send buffer to buffer containing alias
+- \":er alias esc\" - Send esc to buffer containing alias
+- \":er alias :ret\" - Send return to buffer containing alias
+- Empty or no prefix - Use interactive buffer selection
+
+Category: Center File Multi-buffer Access"
+  (interactive "sAction (or empty for selection): ")
+  (let* ((buffer-text (buffer-substring-no-properties (point-min) (point-max)))
+         (enkan-buffers (enkan-repl--collect-enkan-buffers-pure (buffer-list)))
+         (valid-buffers (enkan-repl--filter-valid-buffers-pure enkan-buffers)))
+
+    (if (string-empty-p action-string)
+        ;; No action specified - use selection UI
+        (if (> (length valid-buffers) 0)
+            (let* ((choices (enkan-repl--build-buffer-selection-choices-pure valid-buffers))
+                   (selected-display (completing-read "Select buffer for buffer send: " choices nil t))
+                   (target-buffer (cdr (assoc selected-display choices))))
+              (if (enkan-repl--center-send-text-to-buffer buffer-text target-buffer)
+                  (message "Buffer sent to buffer: %s" (buffer-name target-buffer))
+                (message "Failed to send buffer to buffer: %s" (buffer-name target-buffer))))
+          (message "No active enkan sessions found"))
+      ;; Parse action string
+      (let ((parsed (enkan-repl-center--parse-alias-command-pure action-string)))
+        (if (plist-get parsed :valid)
+            (let* ((alias (plist-get parsed :alias))
+                   (command (plist-get parsed :command))
+                   (resolved-buffer (enkan-repl-center--resolve-alias-to-buffer-pure
+                                    alias valid-buffers)))
+              (if resolved-buffer
+                  (cond
+                   ((eq command :esc)
+                    ;; Send ESC using exact same logic as enkan-repl--send-escape-directly
+                    (if (and resolved-buffer
+                             (with-current-buffer resolved-buffer
+                               (and (boundp 'eat--process)
+                                    eat--process
+                                    (process-live-p eat--process))))
+                        (progn
+                          (enkan-repl--debug-message "Sending ESC key to session buffer")
+                          (with-current-buffer resolved-buffer
+                            (eat--send-string eat--process "\e")
+                            ;; Move cursor to bottom after eat processes the output
+                            (run-at-time 0.01 nil
+                                         (lambda (buf)
+                                           (with-current-buffer buf
+                                             (goto-char (point-max))))
+                                         resolved-buffer)
+                            (enkan-repl--debug-message "ESC key sent successfully"))
+                          (message "Sent ESC to session"))
+                      (message "❌ Cannot send - buffer has no active eat process")))
+                   ((eq command :ret)
+                    (if (enkan-repl--center-send-text-to-buffer "\r" resolved-buffer)
+                        (message "Return sent to buffer: %s" (buffer-name resolved-buffer))
+                      (message "Failed to send return to buffer: %s" (buffer-name resolved-buffer))))
+                   ((eq command :empty)
+                    (if (enkan-repl--center-send-text-to-buffer buffer-text resolved-buffer)
+                        (message "Buffer sent to buffer: %s" (buffer-name resolved-buffer))
+                      (message "Failed to send buffer to buffer: %s" (buffer-name resolved-buffer))))
+                   ((eq command :text)
+                    (let ((combined-text (concat buffer-text " " (plist-get parsed :text))))
+                      (if (enkan-repl--center-send-text-to-buffer combined-text resolved-buffer)
+                          (message "Combined text sent to buffer: %s" (buffer-name resolved-buffer))
+                        (message "Failed to send combined text to buffer: %s" (buffer-name resolved-buffer)))))
+                   (t
+                    (message "Unknown command: %s" command)))
+                (message "No buffer found matching alias: %s" alias)))
+          (message "Invalid action format: %s" (plist-get parsed :message)))))))
 
 (provide 'enkan-repl)
 

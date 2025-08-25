@@ -275,7 +275,6 @@ This is set automatically when enkan-simple-3pane-setup is called.")
   (with-output-to-temp-buffer "*Enkan 3pane Keybindings*"
     (princ "Enkan Simple 3pane Mode Keybindings\n")
     (princ "====================================\n\n")
-    
     ;; Show base keybindings
     (princ "Base Keybindings (inherited):\n")
     (princ "------------------------------\n")
@@ -287,7 +286,6 @@ This is set automatically when enkan-simple-3pane-setup is called.")
           (unless (member (car def) overridden-keys)
             (princ (format "  %-15s - %s\n" (nth 0 def) (nth 2 def)))))))
     (princ "\n")
-    
     ;; Show 3pane-specific overrides
     (princ "3pane Mode Overrides:\n")
     (princ "----------------------\n")
@@ -295,7 +293,6 @@ This is set automatically when enkan-simple-3pane-setup is called.")
         (princ (enkan-keybinding-format-description enkan-simple-3pane-keybinding-overrides))
       ;; Fallback if constants not loaded
       (princ "  C-t         - Switch between input/misc windows\n"))
-    
     (princ "\nNote: 3pane mode overrides take precedence over base keybindings.\n")))
 
 ;;; ========================================

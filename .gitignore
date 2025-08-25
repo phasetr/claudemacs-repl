@@ -22,6 +22,7 @@ dist/
 coverage/
 .coverage/
 test/coverage-analysis.md
+coverage-report.json
 
 # Test artifacts
 *-test.log

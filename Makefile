@@ -21,10 +21,10 @@ install-deps: ## Install required dependencies (package-lint)
 	$(BATCH) --eval "(progn (require 'package) (add-to-list 'package-archives '(\"melpa\" . \"https://melpa.org/packages/\")) (package-refresh-contents) (package-install 'package-lint))"
 
 test: ## Run ERT tests
-	$(BATCH) --eval "(add-to-list 'load-path \".\")" -l enkan-repl.el -l test/enkan-repl-test.el -f ert-run-tests-batch-and-exit
+	$(BATCH) --eval "(add-to-list 'load-path \".\")" -l scripts/load-all-tests.el
 
 test-docs: ## Run generate-docs tests
-	$(BATCH) --eval "(add-to-list 'load-path \".\")" -l test/generate-docs-test.el -f ert-run-tests-batch-and-exit
+	$(BATCH) --eval "(add-to-list 'load-path \".\")" -l scripts/load-all-tests.el
 
 test-all: test test-docs ## Run all tests (core package and development tools)
 
